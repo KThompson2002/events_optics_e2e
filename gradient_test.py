@@ -1,35 +1,34 @@
 import torch
-
-# --- SENPI IMPORT (ADJUST IF NEEDED) ---
-from senpi.simulation.simulator import Simulator
+import senpi
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+torch.manual_seed(0)
 
-# Create simulator
-sim = Simulator(
-    threshold=0.2,
-    refractory_period=1e-3,
-    device=device
-)
+# Create simulator (SENPI EBI API)
+sim = senpi.sim.EventSimulator()
 
-# Fake photometric input: [frames, H, W]
-F, H, W = 16, 64, 64
-I = torch.rand(F, H, W, device=device, requires_grad=True)
+# Create photometric input: [f, x, y] = [frames, H, W]
+F, H, W = 32, 64, 64
 
-# Forward through SENPI
-events = sim.forward(I)   # expected [n,4]
+# Force events (a brightness ramp) so n>0
+base = torch.rand(1, H, W, device=device)
+I = torch.cat([(base + 0.01 * t).clamp(0, 1) for t in range(F)], dim=0)
+I.requires_grad_(True)
 
-print("Events shape:", events.shape)
-print("Requires grad on events?:", events.requires_grad)
+events = sim.forward(I)  # expected [n,4] in [t,x,y,p]
 
-# Build a dummy differentiable loss from events
-# Use polarity column (p) as float
-loss = events[:, 3].float().sum()
+print("events type:", type(events))
+print("events shape:", tuple(events.shape) if isinstance(events, torch.Tensor) else None)
+print("events dtype:", events.dtype if isinstance(events, torch.Tensor) else None)
+print("events requires_grad:", events.requires_grad if isinstance(events, torch.Tensor) else None)
 
-print("Loss:", loss.item())
+if not isinstance(events, torch.Tensor) or events.numel() == 0:
+    raise RuntimeError("No events tensor produced (or n=0).")
 
-# Backprop
+# Differentiable scalar (avoid using events.shape[0])
+loss = events.float().sum()
 loss.backward()
 
-print("Gradient on input exists?:", I.grad is not None)
-print("Mean |grad| on input:", I.grad.abs().mean().item() if I.grad is not None else None)
+print("I.grad is None?:", I.grad is None)
+print("mean(|grad|):", I.grad.abs().mean().item() if I.grad is not None else None)
+print("max(|grad|):", I.grad.abs().max().item() if I.grad is not None else None)
