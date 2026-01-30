@@ -17,6 +17,20 @@ def make_checkerboard(H, W, squares=8, device="cuda", dtype=torch.float32):
     board = ((cx + cy) % 2).to(dtype)
     return (0.15 + 0.85 * board).clamp(0, 1)  # [H,W]
 
+def get_lens_geometry(lens):
+    radii = []
+    thickness = []
+
+    for surf in lens.surfaces:   # GeoLens stores optical surfaces here
+        if hasattr(surf, "radius"):
+            radii.append(float(surf.radius))
+        if hasattr(surf, "thickness"):
+            thickness.append(float(surf.thickness))
+
+    mean_radius = sum(radii)/len(radii) if radii else 0.0
+    mean_thickness = sum(thickness)/len(thickness) if thickness else 0.0
+
+    return mean_radius, mean_thickness
 
 def translate_video(img_hw, T=32, dx_per_frame=0.6, dy_per_frame=0.0):
     """
@@ -118,7 +132,8 @@ def main():
     log_path = "e2e_log.csv"
     with open(log_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["iter", "edge", "activity", "loss", "num_events"])
+        # writer.writerow(["iter", "edge", "activity", "loss", "num_events"])
+        writer.writerow(["iter","edge","activity","loss","num_events","mean_radius","mean_thickness"])
 
 
     for it in range(60):
@@ -146,8 +161,12 @@ def main():
 
         with open(log_path, "a", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([it, edge.item(), activity.item(), loss.item(), int(events.shape[0])])
+            # writer.writerow([it, edge.item(), activity.item(), loss.item(), int(events.shape[0])])
+            mean_r, mean_t = get_lens_geometry(lens)
+            writer.writerow([it, edge.item(), activity.item(), loss.item(), int(events.shape[0]), mean_r, mean_t])
 
+        if it % 10 == 0:
+            lens.plot_layout(filename=f"lens_layout_{it:03d}.png")
         loss.backward()
 
         # --------------------------

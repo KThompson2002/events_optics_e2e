@@ -1,7 +1,7 @@
 import csv
 import matplotlib.pyplot as plt
 
-iters, edge, activity, loss, num_events = [], [], [], [], []
+iters, edge, activity, loss, num_events, mean_r, mean_t = [], [], [], [], [], [], []
 
 with open("e2e_log.csv", "r") as f:
     reader = csv.DictReader(f)
@@ -11,6 +11,9 @@ with open("e2e_log.csv", "r") as f:
         activity.append(float(row["activity"]))
         loss.append(float(row["loss"]))
         num_events.append(int(row["num_events"]))
+        mean_r.append(int(row["mean_radius"]))
+        mean_t.append(int(row["mean_thickness"]))
+
 
 plt.figure()
 plt.plot(iters, edge)
@@ -31,4 +34,18 @@ plt.plot(iters, activity)
 plt.xlabel("Iteration")
 plt.ylabel("Mean |event frame|")
 plt.title("Event-frame activity")
+plt.show()
+
+plt.figure()
+plt.plot(iters, mean_r)
+plt.title("Mean Surface Radius (Lens Curvature Change)")
+plt.xlabel("Iteration")
+plt.ylabel("Radius")
+plt.show()
+
+plt.figure()
+plt.plot(iters, mean_t)
+plt.title("Mean Surface Thickness / Spacing")
+plt.xlabel("Iteration")
+plt.ylabel("Thickness")
 plt.show()
