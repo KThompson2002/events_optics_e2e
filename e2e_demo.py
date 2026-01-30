@@ -68,18 +68,6 @@ def rgb_to_gray(video_tchw):
     r, g, b = video_tchw[:, 0], video_tchw[:, 1], video_tchw[:, 2]
     return (0.2989 * r + 0.5870 * g + 0.1140 * b).clamp(1e-6, 1.0)
 
-def get_lens_param_stats(lens):
-    radii = []
-    thickness = []
-    for name, p in lens.named_parameters():
-        if p.requires_grad:
-            if "radius" in name.lower():
-                radii.append(p.detach().mean().item())
-            if "thickness" in name.lower() or "dist" in name.lower():
-                thickness.append(p.detach().mean().item())
-    r_mean = sum(radii)/len(radii) if radii else 0.0
-    t_mean = sum(thickness)/len(thickness) if thickness else 0.0
-    return r_mean, t_mean
 
 def main():
     assert torch.cuda.is_available(), "This MVI expects CUDA for DeepLens + speed."
@@ -127,10 +115,10 @@ def main():
     lam = 0.05  # activity penalty weight
 
     import csv
-    logfile = "e2e_log.csv"
-    with open(logfile, "w", newline="") as f:
+    log_path = "e2e_log.csv"
+    with open(log_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["iter", "edge", "activity", "loss", "num_events", "mean_radius", "mean_thickness"])
+        writer.writerow(["iter", "edge", "activity", "loss", "num_events"])
 
 
     for it in range(60):
@@ -156,11 +144,9 @@ def main():
         activity = eframes.abs().mean()
         loss = -(edge - lam * activity)  # maximize edge while discouraging trivial high activity
 
-        mean_r, mean_t = get_lens_param_stats(lens)
-
-        with open(logfile, "a", newline="") as f:
+        with open(log_path, "a", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([it, edge.item(), activity.item(), loss.item(), int(events.shape[0]), mean_r, mean_t])
+            writer.writerow([it, edge.item(), activity.item(), loss.item(), int(events.shape[0])])
 
         loss.backward()
 
