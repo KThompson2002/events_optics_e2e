@@ -166,7 +166,7 @@ def main():
             writer.writerow([it, edge.item(), activity.item(), loss.item(), int(events.shape[0]), mean_r, mean_t])
 
         if it % 10 == 0:
-            lens.plot_layout(filename=f"lens_layout_{it:03d}.png")
+            lens.draw_layout(filename=f"lens_layout_{it:03d}.png")
         loss.backward()
 
         # --------------------------
