@@ -78,7 +78,7 @@ def main():
     #  - use separate optimizers, or
     #  - step both each iteration.
     # We’ll do both.
-    scaler = torch.cuda.amp.GradScaler("cuda")
+    scaler = torch.cuda.amp.GradScaler(device_type="cuda")
 
     for epoch in range(5):
         for step, (rgb_tchw, gt_xyz_cam) in enumerate(dl):
@@ -90,7 +90,7 @@ def main():
             if lens_optim is not None:
                 lens_optim.zero_grad()
 
-            with torch.cuda.amp.autocast('cuda'):
+            with torch.cuda.amp.autocast(device_type="cuda"):
                 B, T_, C, H, W = rgb_tchw.shape
                 assert T_ == T
 
