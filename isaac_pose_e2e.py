@@ -8,6 +8,7 @@ from senpi.sim.simulator import EventSimulator
 from senpi.sim.params import make_params
 from isaac_pose_sequence import IsaacPoseSequence
 from torch.amp import autocast, GradScaler
+import numpy as np
 
 def make_resnet18_time_as_channels(T: int, out_dim: int = 3):
     m = models.resnet18(weights=None)
@@ -91,6 +92,17 @@ def main():
     # We’ll do both.
     scaler = GradScaler("cuda")
 
+    log = {
+        "global_step": [],
+        "loss": [],
+        "pred_xyz": [],   # [N,3]
+        "gt_xyz": [],     # [N,3]
+        "epoch": [],
+        "step": [],
+        "b": [],
+    }
+    global_step = 0
+
     for epoch in range(5):
         for step, (rgb_tchw, gt_xyz_cam) in enumerate(dl):
             # rgb_tchw: [B,T,3,H,W]
@@ -130,6 +142,16 @@ def main():
                     loss_b = F.mse_loss(pred_xyz.squeeze(0), gt_xyz_cam[b])
                     losses.append(loss_b)
 
+                    log["global_step"].append(global_step)
+                    log["epoch"].append(epoch)
+                    log["step"].append(step)
+                    log["b"].append(b)
+
+                    log["pred_xyz"].append(pred_xyz.detach().float().cpu().squeeze(0).numpy())
+                    log["gt_xyz"].append(gt_xyz_cam[b].detach().float().cpu().numpy())
+                    log["loss"].append(loss_b.detach().float().cpu().item())
+                    global_step += 1
+
                 loss = torch.stack(losses).mean()
 
             scaler.scale(loss).backward()
@@ -141,6 +163,24 @@ def main():
             if step % 20 == 0:
                 print(f"epoch={epoch} step={step} loss={loss.item():.6f}")
 
+
+    pred_xyz = np.stack(log["pred_xyz"], axis=0)  # [N,3]
+    gt_xyz   = np.stack(log["gt_xyz"], axis=0)    # [N,3]
+    losses   = np.array(log["loss"], dtype=np.float32)
+    steps    = np.array(log["global_step"], dtype=np.int64)
+
+    out_path = "train_log_pose.npz"
+    np.savez(
+        out_path,
+        global_step=steps,
+        loss=losses,
+        pred_xyz=pred_xyz,
+        gt_xyz=gt_xyz,
+        epoch=np.array(log["epoch"]),
+        step=np.array(log["step"]),
+        b=np.array(log["b"]),
+    )
+    print(f"Saved logs to {out_path}")
     print("Done.")
 
 if __name__ == "__main__":
