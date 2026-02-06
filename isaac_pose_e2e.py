@@ -121,6 +121,9 @@ def main():
                     _, eframes = sim.forward(I)              # eframes: [T,H,W] float, differentiable
 
                     x = eframes.unsqueeze(0)                 # [1,T,H,W]
+                    device = next(model.parameters()).device
+                    dtype  = next(model.parameters()).dtype
+                    x = x.to(device=device, dtype=dtype)
                     pred_xyz = model(x)                      # [1,3]
                     preds.append(pred_xyz)
 
