@@ -7,6 +7,7 @@ from deeplens import GeoLens
 from senpi.sim.simulator import EventSimulator
 from senpi.sim.params import make_params
 from isaac_pose_sequence import IsaacPoseSequence
+
 def make_resnet18_time_as_channels(T: int, out_dim: int = 3):
     m = models.resnet18(weights=None)
     m.conv1 = nn.Conv2d(
@@ -30,7 +31,7 @@ def main():
     # ----------------
     # Data
     # ----------------
-    DATA_ROOT = "./isaac_pose_mvi"
+    DATA_ROOT = "~/isaacsim/isaac_pose_mvi/"
     T = 32
     ds = IsaacPoseSequence(DATA_ROOT, T=T, stride=1)
     dl = DataLoader(ds, batch_size=2, shuffle=True, num_workers=0, pin_memory=True)
