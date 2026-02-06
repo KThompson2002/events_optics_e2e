@@ -58,19 +58,17 @@ def main():
         # Camera looking at target
         cam = rep.create.camera(position=(1.0, 0.0, 0.5), look_at=target)
 
-        cam_path = rep.utils.get_node_targets(cam.node, "inputs:prims")[0]
         tgt_path = rep.utils.get_node_targets(target.node, "inputs:prims")[0]
+        cam_path = rep.utils.get_node_targets(cam.node, "inputs:prims")[0]
+        print("Target prim path:", tgt_path)
+        print("Camera prim path:", cam_path)
 
         rp = rep.create.render_product(cam, RES)
-
-        # RGB annotator (LdrColor) :contentReference[oaicite:3]{index=3}
         rgb_anno = rep.AnnotatorRegistry.get_annotator("LdrColor")
         rgb_anno.attach(rp)
 
-        # (Optional) camera params annotator (intrinsics/extrinsics)
         cam_anno = rep.AnnotatorRegistry.get_annotator("camera_params")
         cam_anno.attach(rp)
-
         # NOTE: We created prims via ReplicatorItem; we’ll use the actual prim paths for labels.
         # If you want deterministic paths, you can spawn USD assets at fixed prim paths instead.
 
@@ -81,10 +79,10 @@ def main():
         for i in range(N):
             # simple randomization: move target around
             # (keep it in front of camera)
-            x = np.random.uniform(0.2, 1.2)
+            x = np.random.uniform(0.3, 1.2)
             y = np.random.uniform(-0.4, 0.4)
-            z = np.random.uniform(0.1, 0.8)
-            rep.modify.pose(position=(x, y, z), input_prims=[tgt_path])
+            z = np.random.uniform(0.15, 0.9)
+            rep.modify.pose(position=(x, y, z), input_prims=[target])
 
             # Step capture (this triggers annotators) :contentReference[oaicite:4]{index=4}
             rep.orchestrator.step()
@@ -96,21 +94,24 @@ def main():
             if rgb.shape[0] == RES[0] and rgb.shape[1] == RES[1]:
                 rgb = np.transpose(rgb, (1, 0, 2))  # -> (H,W,4)
 
-            rgb_path = os.path.join(OUT_DIR, "rgb", f"{i:06d}.npy")
-            np.save(rgb_path, rgb)
+            # rgb_path = os.path.join(OUT_DIR, "rgb", f"{i:06d}.npy")
+            # np.save(rgb_path, rgb)
+            np.save(os.path.join(OUT_DIR, "rgb", f"{i:06d}.npy"), rgb)
 
+            cam_params = cam_anno.get_data()
             cam_t, cam_q = get_world_transform(cam_path)
             tgt_t, tgt_q = get_world_transform(tgt_path)
-
 
             labels.append({
                 "i": i,
                 "rgb": f"rgb/{i:06d}.npy",
+                "camera_prim_path": cam_path,
+                "target_prim_path": tgt_path,
                 "camera_world_t": cam_t.tolist(),
                 "camera_world_q_wxyz": cam_q.tolist(),
                 "target_world_t": tgt_t.tolist(),
                 "target_world_q_wxyz": tgt_q.tolist(),
-                "camera_params": cam_params  # json-serializable dict (usually)
+                "camera_params": cam_params,
             })
 
             if i % 100 == 0:
@@ -118,11 +119,8 @@ def main():
     finally:
         with open(os.path.join(OUT_DIR, "labels.json"), "w") as f:
             json.dump(labels, f)
+        print(f"Wrote labels.json with {len(labels)} entries.")
 
-    with open(os.path.join(OUT_DIR, "labels.json"), "w") as f:
-        json.dump(labels, f)
-
-    print("Done.")
     simulation_app.close()
 
 
