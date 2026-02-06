@@ -42,9 +42,6 @@ def main():
     OUT_DIR = "./isaac_pose_mvi"
     N = 2000
     RES = (320, 240)  # (W,H) per Replicator render_product API
-    CAMERA_PATH = "/World/Camera"
-    TARGET_PATH = "/World/Target"
-
     ensure_dir(OUT_DIR)
     ensure_dir(os.path.join(OUT_DIR, "rgb"))
 
@@ -60,6 +57,9 @@ def main():
         target = rep.create.cube(position=(0, 0, 0), scale=(0.1, 0.1, 0.1))
         # Camera looking at target
         cam = rep.create.camera(position=(1.0, 0.0, 0.5), look_at=target)
+
+        cam_path = rep.utils.get_node_targets(cam.node, "inputs:prims")[0]
+        tgt_path = rep.utils.get_node_targets(target.node, "inputs:prims")[0]
 
         rp = rep.create.render_product(cam, RES)
 
@@ -77,42 +77,47 @@ def main():
     labels = []
 
     # ---------- Data loop ----------
-    for i in range(N):
-        # simple randomization: move target around
-        # (keep it in front of camera)
-        x = np.random.uniform(0.2, 1.2)
-        y = np.random.uniform(-0.4, 0.4)
-        z = np.random.uniform(0.1, 0.8)
-        rep.modify.pose(position=(x, y, z), input_prims=[TARGET_PATH])
+    try:
+        for i in range(N):
+            # simple randomization: move target around
+            # (keep it in front of camera)
+            x = np.random.uniform(0.2, 1.2)
+            y = np.random.uniform(-0.4, 0.4)
+            z = np.random.uniform(0.1, 0.8)
+            rep.modify.pose(position=(x, y, z), input_prims=[tgt_path])
 
-        # Step capture (this triggers annotators) :contentReference[oaicite:4]{index=4}
-        rep.orchestrator.step()
+            # Step capture (this triggers annotators) :contentReference[oaicite:4]{index=4}
+            rep.orchestrator.step()
 
-        rgb = rgb_anno.get_data()  # uint8 RGBA :contentReference[oaicite:5]{index=5}
-        cam_params = cam_anno.get_data()
+            rgb = rgb_anno.get_data()  # uint8 RGBA :contentReference[oaicite:5]{index=5}
+            cam_params = cam_anno.get_data()
 
-        # Handle shape: some versions return (H,W,4), docs say (W,H,4) :contentReference[oaicite:6]{index=6}
-        if rgb.shape[0] == RES[0] and rgb.shape[1] == RES[1]:
-            rgb = np.transpose(rgb, (1, 0, 2))  # -> (H,W,4)
+            # Handle shape: some versions return (H,W,4), docs say (W,H,4) :contentReference[oaicite:6]{index=6}
+            if rgb.shape[0] == RES[0] and rgb.shape[1] == RES[1]:
+                rgb = np.transpose(rgb, (1, 0, 2))  # -> (H,W,4)
 
-        rgb_path = os.path.join(OUT_DIR, "rgb", f"{i:06d}.npy")
-        np.save(rgb_path, rgb)
+            rgb_path = os.path.join(OUT_DIR, "rgb", f"{i:06d}.npy")
+            np.save(rgb_path, rgb)
 
-        cam_t, cam_q = get_world_transform(CAMERA_PATH)
-        tgt_t, tgt_q = get_world_transform(TARGET_PATH)
+            cam_t, cam_q = get_world_transform(cam_path)
+            tgt_t, tgt_q = get_world_transform(tgt_path)
 
-        labels.append({
-            "i": i,
-            "rgb": f"rgb/{i:06d}.npy",
-            "camera_world_t": cam_t.tolist(),
-            "camera_world_q_wxyz": cam_q.tolist(),
-            "target_world_t": tgt_t.tolist(),
-            "target_world_q_wxyz": tgt_q.tolist(),
-            "camera_params": cam_params  # json-serializable dict (usually)
-        })
 
-        if i % 100 == 0:
-            print(f"Captured {i}/{N}")
+            labels.append({
+                "i": i,
+                "rgb": f"rgb/{i:06d}.npy",
+                "camera_world_t": cam_t.tolist(),
+                "camera_world_q_wxyz": cam_q.tolist(),
+                "target_world_t": tgt_t.tolist(),
+                "target_world_q_wxyz": tgt_q.tolist(),
+                "camera_params": cam_params  # json-serializable dict (usually)
+            })
+
+            if i % 100 == 0:
+                print(f"Captured {i}/{N}")
+    finally:
+        with open(os.path.join(OUT_DIR, "labels.json"), "w") as f:
+            json.dump(labels, f)
 
     with open(os.path.join(OUT_DIR, "labels.json"), "w") as f:
         json.dump(labels, f)
