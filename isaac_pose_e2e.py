@@ -25,6 +25,16 @@ def rgb_to_gray(video_tchw):
     r, g, b = video_tchw[:, 0], video_tchw[:, 1], video_tchw[:, 2]
     return (0.2989 * r + 0.5870 * g + 0.1140 * b).clamp(1e-6, 1.0)
 
+def make_video_square(video_tchw):
+    T, C, H, W = video_tchw.shape
+    s = min(H, W) if size is None else int(size)
+    # if user asks for crop to larger than min dim, clamp
+    s = min(s, H, W)
+    y0 = (H - s) // 2
+    x0 = (W - s) // 2
+    return video_tchw[:, :, y0:y0 + s, x0:x0 + s].contiguous()
+
+
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(0)
@@ -40,13 +50,14 @@ def main():
     # Peek H,W from one sample
     rgb0, _ = ds[0]
     _, _, H, W = rgb0.shape
+    S = min(H, W)
 
     # ----------------
     # DeepLens
     # ----------------
     LENS_PATH = "/home/lea1212/CS496/DeepLens/datasets/lenses/camera/ef50mm_f1.8.json"
     lens = GeoLens(filename=LENS_PATH).to(device)
-    lens.set_sensor_res(sensor_res=(H, W))
+    lens.set_sensor_res(sensor_res=(S, S))
 
     # OPTIONAL: train lens too (E2E). If you only want to train CNN first, freeze lens params.
     train_lens = True
@@ -102,8 +113,9 @@ def main():
                 losses = []
                 for b in range(B):
                     video = rgb_tchw[b]  # [T,3,H,W]
+                    video = make_video_square(video, mode="crop")
 
-                    video = video.permute(0, 1, 3, 2)
+
 
                     rendered = lens.render(video, depth=-10000.0, method="ray_tracing", spp=4).clamp(0, 1)
                     I = rgb_to_gray(rendered)                # [T,H,W]
