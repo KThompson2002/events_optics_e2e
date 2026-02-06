@@ -103,6 +103,8 @@ def main():
                 for b in range(B):
                     video = rgb_tchw[b]  # [T,3,H,W]
 
+                    video = video.permute(0, 1, 3, 2)
+
                     rendered = lens.render(video, depth=-10000.0, method="ray_tracing", spp=4).clamp(0, 1)
                     I = rgb_to_gray(rendered)                # [T,H,W]
                     _, eframes = sim.forward(I)              # eframes: [T,H,W] float, differentiable
