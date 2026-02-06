@@ -11,8 +11,8 @@ with open("e2e_log.csv", "r") as f:
         activity.append(float(row["activity"]))
         loss.append(float(row["loss"]))
         num_events.append(int(row["num_events"]))
-        mean_r.append(int(row["mean_radius"]))
-        mean_t.append(int(row["mean_thickness"]))
+        mean_r.append((row["mean_radius"]))
+        mean_t.append((row["mean_thickness"]))
 
 
 plt.figure()

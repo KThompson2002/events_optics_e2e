@@ -8,7 +8,6 @@ from senpi.sim.params import make_params
 import csv
 
 
-# ---------- Synthetic moving scene (differentiable) ----------
 def make_checkerboard(H, W, squares=8, device="cuda", dtype=torch.float32):
     yy = torch.arange(H, device=device).view(H, 1)
     xx = torch.arange(W, device=device).view(1, W)
