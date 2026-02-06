@@ -31,7 +31,7 @@ def main():
     # ----------------
     # Data
     # ----------------
-    DATA_ROOT = "~/isaacsim/isaac_pose_mvi/"
+    DATA_ROOT = "/home/lea1212/isaacsim/isaac_pose_mvi/"
     T = 32
     ds = IsaacPoseSequence(DATA_ROOT, T=T, stride=1)
     dl = DataLoader(ds, batch_size=2, shuffle=True, num_workers=0, pin_memory=True)
