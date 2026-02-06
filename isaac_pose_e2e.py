@@ -7,6 +7,7 @@ from deeplens import GeoLens
 from senpi.sim.simulator import EventSimulator
 from senpi.sim.params import make_params
 from isaac_pose_sequence import IsaacPoseSequence
+from torch.amp import autocast, GradScaler
 
 def make_resnet18_time_as_channels(T: int, out_dim: int = 3):
     m = models.resnet18(weights=None)
@@ -78,7 +79,7 @@ def main():
     #  - use separate optimizers, or
     #  - step both each iteration.
     # We’ll do both.
-    scaler = torch.cuda.amp.GradScaler(device_type="cuda")
+    scaler = GradScaler("cuda")
 
     for epoch in range(5):
         for step, (rgb_tchw, gt_xyz_cam) in enumerate(dl):
@@ -90,7 +91,7 @@ def main():
             if lens_optim is not None:
                 lens_optim.zero_grad()
 
-            with torch.cuda.amp.autocast(device_type="cuda"):
+            with autocast("cuda"):
                 B, T_, C, H, W = rgb_tchw.shape
                 assert T_ == T
 
