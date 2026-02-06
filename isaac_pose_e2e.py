@@ -27,9 +27,8 @@ def rgb_to_gray(video_tchw):
 
 def make_video_square(video_tchw):
     T, C, H, W = video_tchw.shape
-    s = min(H, W) if size is None else int(size)
+    s = min(H, W)
     # if user asks for crop to larger than min dim, clamp
-    s = min(s, H, W)
     y0 = (H - s) // 2
     x0 = (W - s) // 2
     return video_tchw[:, :, y0:y0 + s, x0:x0 + s].contiguous()
@@ -113,7 +112,7 @@ def main():
                 losses = []
                 for b in range(B):
                     video = rgb_tchw[b]  # [T,3,H,W]
-                    video = make_video_square(video, mode="crop")
+                    video = make_video_square(video)
 
 
 
