@@ -45,7 +45,7 @@ def main():
     # ----------------
     LENS_PATH = "/home/lea1212/CS496/DeepLens/datasets/lenses/camera/ef50mm_f1.8.json"
     lens = GeoLens(filename=LENS_PATH).to(device)
-    lens.set_sensor_res(sensor_res=(W, H))
+    lens.set_sensor_res(sensor_res=(H, W))
 
     # OPTIONAL: train lens too (E2E). If you only want to train CNN first, freeze lens params.
     train_lens = True
@@ -78,7 +78,7 @@ def main():
     #  - use separate optimizers, or
     #  - step both each iteration.
     # We’ll do both.
-    scaler = torch.cuda.amp.GradScaler("cuda", enabled=torch.cuda.is_available())
+    scaler = torch.cuda.amp.GradScaler("cuda")
 
     for epoch in range(5):
         for step, (rgb_tchw, gt_xyz_cam) in enumerate(dl):
@@ -90,7 +90,7 @@ def main():
             if lens_optim is not None:
                 lens_optim.zero_grad()
 
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            with torch.cuda.amp.autocast('cuda'):
                 B, T_, C, H, W = rgb_tchw.shape
                 assert T_ == T
 
