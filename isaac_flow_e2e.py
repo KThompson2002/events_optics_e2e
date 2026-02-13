@@ -111,7 +111,7 @@ def main():
     # ------------------------------------------------------------------
     # Data  (Isaac-Sim optical flow dataset)
     # ------------------------------------------------------------------
-    DATA_ROOT = "./isaac_flow_data"
+    DATA_ROOT = "/home/lea1212/isaacsim/isaac_flow_data"
     T = 32                       # frames per sequence
     ds = IsaacFlowSequence(DATA_ROOT, T=T, stride=1)
     dl = DataLoader(ds, batch_size=2, shuffle=True,
