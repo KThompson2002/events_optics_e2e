@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import numpy as np
 
-from isaac_pose_sequence import IsaacPoseSequence
+from isaac_flow_sequence import IsaacFlowSequence
 from models.FlowNetS_spike import FlowNetS_spike
 from multiscaleloss import warp, charbonnier_loss, smooth_loss
 
@@ -109,11 +109,11 @@ def main():
     torch.manual_seed(0)
 
     # ------------------------------------------------------------------
-    # Data  (reuse Isaac-Sim pose dataset; ignore pose labels)
+    # Data  (Isaac-Sim optical flow dataset)
     # ------------------------------------------------------------------
-    DATA_ROOT = "/home/lea1212/isaacsim/isaac_pose_mvi/"
+    DATA_ROOT = "./isaac_flow_data"
     T = 32                       # frames per sequence
-    ds = IsaacPoseSequence(DATA_ROOT, T=T, stride=1)
+    ds = IsaacFlowSequence(DATA_ROOT, T=T, stride=1)
     dl = DataLoader(ds, batch_size=2, shuffle=True,
                     num_workers=0, pin_memory=True)
 
