@@ -241,6 +241,14 @@ def main():
         step=np.array(log["step"]),
     )
     print(f"Saved training logs to {out_path}")
+    torch.save(
+        {
+            "model_state": model.state_dict(),
+            "spike_thresh": SP_THRESH,
+            "image_size": IMAGE_SIZE,
+        },
+        "spike_flownet_senpi.pth"
+    )
     print("Done.")
 
 
