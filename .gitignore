@@ -1,2 +1,13 @@
 venv/
 __pycache__/
+# Data / results
+*.npz
+*.png
+
+# Optional extras
+*.npy
+*.pt
+*.pth
+*.ckpt
+results/
+outputs/
