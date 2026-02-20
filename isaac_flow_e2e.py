@@ -223,8 +223,8 @@ def main():
     # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
-    NUM_EPOCHS = 50
-    SMOOTH_WEIGHT = 0.001
+    NUM_EPOCHS = 5
+    SMOOTH_WEIGHT = 10.0
     multiscale_weights = [1, 1, 1, 1]
 
     for epoch in range(NUM_EPOCHS):
