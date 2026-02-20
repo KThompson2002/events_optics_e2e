@@ -128,7 +128,7 @@ def main():
         {'params': model.bias_parameters(), 'weight_decay': 0},
         {'params': model.weight_parameters(), 'weight_decay': 4e-4},
     ]
-    optimizer = torch.optim.Adam(param_groups, lr=5e-5,
+    optimizer = torch.optim.Adam(param_groups, lr=2e-5,
                                  betas=(0.9, 0.999))
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
@@ -149,8 +149,8 @@ def main():
     # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
-    NUM_EPOCHS = 100
-    SMOOTH_WEIGHT = 10.0
+    NUM_EPOCHS = 50
+    SMOOTH_WEIGHT = 0.001
     multiscale_weights = [1, 1, 1, 1]
 
     for epoch in range(NUM_EPOCHS):
