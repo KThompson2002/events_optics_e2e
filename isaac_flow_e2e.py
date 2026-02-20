@@ -2,8 +2,11 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'Spike-FlowNet'))
 
+import random
+import math
 import torch
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 from torch.utils.data import DataLoader
 import numpy as np
 
@@ -99,9 +102,61 @@ def rgb_to_gray(video_tchw):
     return (0.2989 * r + 0.5870 * g + 0.1140 * b).clamp(1e-6, 1.0)
 
 
-IMAGE_SIZE = 256          # Spike-FlowNet default spatial resolution
-T_BINS     = 5            # temporal bins per half
-SP_THRESH  = 0.75         # spiking threshold
+IMAGE_SIZE         = 256   # Spike-FlowNet default spatial resolution
+T_BINS             = 5     # temporal bins per half
+SP_THRESH          = 0.75  # spiking threshold
+EVENT_THRESH       = 0.5   # sigmoid > EVENT_THRESH → definite event (binarize)
+MIN_EVENT_ACTIVITY = 10.0  # skip sequences with fewer total binary events
+
+
+# ---------------------------------------------------------------------------
+# Consistent geometric augmentation for a full RGB sequence
+# ---------------------------------------------------------------------------
+def augment_sequence(video_tchw):
+    """
+    Apply identical random geometric augmentation to every frame in a sequence,
+    matching the transforms used in Spike-FlowNet's Train_loading:
+      RandomHorizontalFlip(0.5), RandomVerticalFlip(0.5),
+      RandomRotation(30), RandomResizedCrop(IMAGE_SIZE, scale=(0.5,1.0))
+
+    Using the same sampled parameters for all T frames keeps the event
+    differences (and therefore the spike representation) geometrically
+    consistent with the augmented frames.
+
+    video_tchw : [T, 3, H, W]  float32 in [0, 1], any device
+    returns    : [T, 3, IMAGE_SIZE, IMAGE_SIZE]  same device
+    """
+    T, C, H, W = video_tchw.shape
+
+    # Sample all augmentation parameters once for the whole sequence
+    hflip = random.random() < 0.5
+    vflip = random.random() < 0.5
+    angle = random.uniform(-30.0, 30.0)
+
+    # RandomResizedCrop: compute a single crop box
+    scale     = random.uniform(0.5, 1.0)
+    ratio     = random.uniform(0.75, 4.0 / 3.0)
+    crop_area = H * W * scale
+    crop_w    = max(1, min(int(round(math.sqrt(crop_area * ratio))), W))
+    crop_h    = max(1, min(int(round(math.sqrt(crop_area / ratio))), H))
+    top       = random.randint(0, H - crop_h)
+    left      = random.randint(0, W - crop_w)
+
+    frames = []
+    for t in range(T):
+        frame = video_tchw[t]                                   # [3, H, W]
+        if hflip:
+            frame = TF.hflip(frame)
+        if vflip:
+            frame = TF.vflip(frame)
+        frame = TF.rotate(frame, angle,
+                          interpolation=TF.InterpolationMode.BILINEAR)
+        frame = TF.resized_crop(frame, top, left, crop_h, crop_w,
+                                (IMAGE_SIZE, IMAGE_SIZE),
+                                interpolation=TF.InterpolationMode.BILINEAR)
+        frames.append(frame)
+
+    return torch.stack(frames, dim=0)                           # [T, 3, 256, 256]
 
 
 # ---------------------------------------------------------------------------
@@ -133,14 +188,27 @@ def validate(model, val_loader, device):
                 video = rgb_tchw[b]                         # [T, 3, H, W]
                 gray  = rgb_to_gray(video)                  # [T, H, W]
 
+                # Resize (no augmentation during validation)
                 gray = gray.unsqueeze(1)
                 gray = F.interpolate(gray, size=(IMAGE_SIZE, IMAGE_SIZE),
                                      mode='bilinear', align_corners=True)
                 gray = gray.squeeze(1)                      # [T, 256, 256]
 
+                # Change 1: per-frame normalize (match Spike-FlowNet preprocessing)
+                frame_max = gray.amax(dim=(1, 2), keepdim=True).clamp(min=1e-6)
+                gray = gray / frame_max
+
                 Epos, Eneg = soft_events(gray, thr=0.1, sharpness=50.0)
-                spike_in   = soft_events_to_spike_input(Epos, Eneg,
-                                                        T_bins=T_BINS)
+
+                # Change 4: binarize soft events → sparse input matching real event data
+                Epos_bin = (Epos.detach() > EVENT_THRESH).float()
+                Eneg_bin = (Eneg.detach() > EVENT_THRESH).float()
+                spike_in = soft_events_to_spike_input(Epos_bin, Eneg_bin,
+                                                      T_bins=T_BINS)
+
+                # Change 2: skip low-activity sequences
+                if spike_in.sum() < MIN_EVENT_ACTIVITY:
+                    continue
 
                 # Eval mode returns only flow1: [1, 2, H, W]
                 flow_pred = model(spike_in.float(), IMAGE_SIZE, SP_THRESH)
@@ -246,21 +314,33 @@ def main():
 
             for b in range(B):
                 video = rgb_tchw[b]                        # [T, 3, H, W]
-                gray = rgb_to_gray(video)                  # [T, H, W]
 
-                # Resize to Spike-FlowNet's expected 256x256
-                gray = gray.unsqueeze(1)                   # [T, 1, H, W]
-                gray = F.interpolate(gray, size=(IMAGE_SIZE, IMAGE_SIZE),
-                                     mode='bilinear', align_corners=True)
-                gray = gray.squeeze(1)                     # [T, 256, 256]
+                # Change 3: augment all T frames with the same random transform;
+                # augment_sequence also resizes to IMAGE_SIZE so no separate
+                # F.interpolate is needed for the training path.
+                video = augment_sequence(video)            # [T, 3, 256, 256]
+
+                gray = rgb_to_gray(video)                  # [T, 256, 256]
+
+                # Change 1: per-frame normalize (match Spike-FlowNet: frame/max)
+                frame_max = gray.amax(dim=(1, 2), keepdim=True).clamp(min=1e-6)
+                gray = gray / frame_max
 
                 # --- Differentiable soft events ---
                 Epos, Eneg = soft_events(gray, thr=0.1, sharpness=50.0)
 
-                # --- Convert to Spike-FlowNet input ---
-                spike_in = soft_events_to_spike_input(Epos, Eneg,
-                                                     T_bins=T_BINS)
+                # Change 4: binarize soft events → sparse input matching real
+                # event camera data; detach so no gradient flows through the
+                # step function (model params receive gradient via flows).
+                Epos_bin = (Epos.detach() > EVENT_THRESH).float()
+                Eneg_bin = (Eneg.detach() > EVENT_THRESH).float()
+                spike_in = soft_events_to_spike_input(Epos_bin, Eneg_bin,
+                                                      T_bins=T_BINS)
                 # spike_in: [1, 4, 256, 256, T_BINS]
+
+                # Change 2: skip sequences with insufficient event activity
+                if spike_in.sum() < MIN_EVENT_ACTIVITY:
+                    continue
 
                 # --- Forward pass ---
                 flows = model(spike_in.float(), IMAGE_SIZE, SP_THRESH)
@@ -281,6 +361,10 @@ def main():
                 losses.append(loss_b)
                 photo_losses.append(p_loss.detach())
                 smooth_losses.append(s_loss.detach())
+
+            # Skip optimizer step if all samples in this batch were filtered
+            if not losses:
+                continue
 
             loss = torch.stack(losses).mean()
 
