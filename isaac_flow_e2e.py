@@ -104,6 +104,73 @@ T_BINS     = 5            # temporal bins per half
 SP_THRESH  = 0.75         # spiking threshold
 
 
+# ---------------------------------------------------------------------------
+# Validation — Average End-point Error against Isaac Sim GT flow
+# ---------------------------------------------------------------------------
+def validate(model, val_loader, device):
+    """
+    Compute mean AEE over the validation set.
+
+    GT flow per sample is accumulated across the T-1 consecutive frame-pairs
+    that fall within the window (gt_flow[:,1:,:,:] summed over time), giving
+    an approximate total pixel displacement from frame[0] to frame[T-1].
+    AEE is averaged only over pixels where the accumulated GT magnitude > 0.
+    """
+    model.eval()
+    aee_total = 0.0
+    n_samples = 0
+
+    with torch.no_grad():
+        for rgb_tchw, gt_flow_tchw in val_loader:
+            # rgb_tchw      : [B, T, 3, H, W]
+            # gt_flow_tchw  : [B, T, 2, H, W]
+            rgb_tchw     = rgb_tchw.to(device, non_blocking=True)
+            gt_flow_tchw = gt_flow_tchw.to(device, non_blocking=True)
+            B = rgb_tchw.shape[0]
+
+            for b in range(B):
+                video = rgb_tchw[b]                         # [T, 3, H, W]
+                gray  = rgb_to_gray(video)                  # [T, H, W]
+
+                gray = gray.unsqueeze(1)
+                gray = F.interpolate(gray, size=(IMAGE_SIZE, IMAGE_SIZE),
+                                     mode='bilinear', align_corners=True)
+                gray = gray.squeeze(1)                      # [T, 256, 256]
+
+                Epos, Eneg = soft_events(gray, thr=0.1, sharpness=50.0)
+                spike_in   = soft_events_to_spike_input(Epos, Eneg,
+                                                        T_bins=T_BINS)
+
+                # Eval mode returns only flow1: [1, 2, H, W]
+                flow_pred = model(spike_in.float(), IMAGE_SIZE, SP_THRESH)
+
+                # Accumulate GT: gt_flow[0] is flow from s-1→s (before our
+                # window); sum gt_flow[1:] to get frame[0]→frame[T-1].
+                gt_total = gt_flow_tchw[b, 1:].sum(dim=0)  # [2, H, W]
+
+                # Resize GT to match model output resolution
+                H_p, W_p = flow_pred.shape[2], flow_pred.shape[3]
+                gt_resized = F.interpolate(
+                    gt_total.unsqueeze(0), size=(H_p, W_p),
+                    mode='bilinear', align_corners=True
+                ).squeeze(0)                                # [2, H, W]
+
+                # Per-pixel endpoint error
+                diff = flow_pred[0] - gt_resized            # [2, H, W]
+                ee   = torch.sqrt(diff[0] ** 2 + diff[1] ** 2)  # [H, W]
+
+                # Mask to pixels with non-zero accumulated GT
+                gt_mag = torch.sqrt(gt_resized[0] ** 2 + gt_resized[1] ** 2)
+                mask   = gt_mag > 0
+
+                if mask.sum() > 0:
+                    aee_total += ee[mask].mean().item()
+                    n_samples += 1
+
+    model.train()
+    return aee_total / max(n_samples, 1)
+
+
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(0)
@@ -113,9 +180,13 @@ def main():
     # ------------------------------------------------------------------
     DATA_ROOT = "/home/lea1212/isaacsim/isaac_flow_data"
     T = 32                       # frames per sequence
-    ds = IsaacFlowSequence(DATA_ROOT, T=T, stride=1)
-    dl = DataLoader(ds, batch_size=2, shuffle=True,
-                    num_workers=0, pin_memory=True)
+    ds_train = IsaacFlowSequence(DATA_ROOT, T=T, stride=1, split='train')
+    ds_val   = IsaacFlowSequence(DATA_ROOT, T=T, stride=1, split='val')
+    dl       = DataLoader(ds_train, batch_size=2, shuffle=True,
+                          num_workers=0, pin_memory=True)
+    val_loader = DataLoader(ds_val, batch_size=2, shuffle=False,
+                            num_workers=0, pin_memory=True)
+    print(f"Dataset split — train: {len(ds_train)}, val: {len(ds_val)}")
 
     # ------------------------------------------------------------------
     # Spike-FlowNet model
@@ -143,8 +214,11 @@ def main():
         "global_step": [], "loss": [],
         "photo_loss": [], "smooth_loss": [],
         "epoch": [], "step": [],
+        # per-epoch validation (one entry per epoch)
+        "val_aee_epoch": [], "val_aee": [],
     }
     global_step = 0
+    best_aee = float('inf')
 
     # ------------------------------------------------------------------
     # Training loop
@@ -227,6 +301,28 @@ def main():
 
         scheduler.step()
 
+        # ------------------------------------------------------------------
+        # Validation (once per epoch)
+        # ------------------------------------------------------------------
+        val_aee = validate(model, val_loader, device)
+        log["val_aee_epoch"].append(epoch)
+        log["val_aee"].append(val_aee)
+        print(f"epoch={epoch}  val_aee={val_aee:.4f}")
+
+        if val_aee < best_aee:
+            best_aee = val_aee
+            torch.save(
+                {
+                    "state_dict": model.state_dict(),
+                    "epoch": epoch,
+                    "val_aee": val_aee,
+                    "spike_thresh": SP_THRESH,
+                    "image_size": IMAGE_SIZE,
+                },
+                "spike_flownet_senpi_best.pth",
+            )
+            print(f"  => saved best checkpoint (val_aee={best_aee:.4f})")
+
     # ------------------------------------------------------------------
     # Save logs
     # ------------------------------------------------------------------
@@ -239,16 +335,21 @@ def main():
         smooth_loss=np.array(log["smooth_loss"], dtype=np.float32),
         epoch=np.array(log["epoch"]),
         step=np.array(log["step"]),
+        val_aee_epoch=np.array(log["val_aee_epoch"]),
+        val_aee=np.array(log["val_aee"], dtype=np.float32),
     )
     print(f"Saved training logs to {out_path}")
     torch.save(
         {
-            "model_state": model.state_dict(),
+            "state_dict": model.state_dict(),
+            "epoch": NUM_EPOCHS - 1,
+            "val_aee": log["val_aee"][-1] if log["val_aee"] else float('inf'),
             "spike_thresh": SP_THRESH,
             "image_size": IMAGE_SIZE,
         },
-        "spike_flownet_senpi.pth"
+        "spike_flownet_senpi_final.pth",
     )
+    print(f"Best val AEE: {best_aee:.4f}  (checkpoint: spike_flownet_senpi_best.pth)")
     print("Done.")
 
 
