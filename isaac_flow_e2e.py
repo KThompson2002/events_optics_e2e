@@ -117,8 +117,9 @@ def validate(model, val_loader, device):
     AEE is averaged only over pixels where the accumulated GT magnitude > 0.
     """
     model.eval()
-    aee_total = 0.0
-    n_samples = 0
+    aee_total    = 0.0
+    aee_gt_total = 0.0
+    n_samples    = 0
 
     with torch.no_grad():
         for rgb_tchw, gt_flow_tchw in val_loader:
@@ -164,11 +165,13 @@ def validate(model, val_loader, device):
                 mask   = gt_mag > 0
 
                 if mask.sum() > 0:
-                    aee_total += ee[mask].mean().item()
-                    n_samples += 1
+                    aee_total    += ee[mask].mean().item()
+                    aee_gt_total += gt_mag[mask].mean().item()
+                    n_samples    += 1
 
     model.train()
-    return aee_total / max(n_samples, 1)
+    n = max(n_samples, 1)
+    return aee_total / n, aee_gt_total / n
 
 
 def main():
@@ -214,8 +217,10 @@ def main():
         "global_step": [], "loss": [],
         "photo_loss": [], "smooth_loss": [],
         "epoch": [], "step": [],
-        # per-epoch validation (one entry per epoch)
-        "val_aee_epoch": [], "val_aee": [],
+        # validation — one entry per check (every 20 steps + end of epoch)
+        "val_global_step": [], "val_aee": [], "val_aee_gt": [],
+        # epoch-boundary entries (subset of above, for convenience)
+        "val_aee_epoch": [],
     }
     global_step = 0
     best_aee = float('inf')
@@ -298,16 +303,25 @@ def main():
                       f"loss={loss.item():.4f}  "
                       f"photo={log['photo_loss'][-1]:.4f}  "
                       f"smooth={log['smooth_loss'][-1]:.4f}")
+                val_aee, val_aee_gt = validate(model, val_loader, device)
+                log["val_global_step"].append(global_step)
+                log["val_aee"].append(val_aee)
+                log["val_aee_gt"].append(val_aee_gt)
+                print(f"  val_aee={val_aee:.4f}  val_aee_gt={val_aee_gt:.4f}  "
+                      f"ratio={val_aee/val_aee_gt:.3f}")
 
         scheduler.step()
 
         # ------------------------------------------------------------------
         # Validation (once per epoch)
         # ------------------------------------------------------------------
-        val_aee = validate(model, val_loader, device)
-        log["val_aee_epoch"].append(epoch)
+        val_aee, val_aee_gt = validate(model, val_loader, device)
+        log["val_global_step"].append(global_step)
         log["val_aee"].append(val_aee)
-        print(f"epoch={epoch}  val_aee={val_aee:.4f}")
+        log["val_aee_gt"].append(val_aee_gt)
+        log["val_aee_epoch"].append(epoch)
+        print(f"[epoch end] epoch={epoch}  val_aee={val_aee:.4f}  "
+              f"val_aee_gt={val_aee_gt:.4f}  ratio={val_aee/val_aee_gt:.3f}")
 
         if val_aee < best_aee:
             best_aee = val_aee
@@ -335,15 +349,17 @@ def main():
         smooth_loss=np.array(log["smooth_loss"], dtype=np.float32),
         epoch=np.array(log["epoch"]),
         step=np.array(log["step"]),
-        val_aee_epoch=np.array(log["val_aee_epoch"]),
+        val_global_step=np.array(log["val_global_step"]),
         val_aee=np.array(log["val_aee"], dtype=np.float32),
+        val_aee_gt=np.array(log["val_aee_gt"], dtype=np.float32),
+        val_aee_epoch=np.array(log["val_aee_epoch"]),
     )
     print(f"Saved training logs to {out_path}")
     torch.save(
         {
             "state_dict": model.state_dict(),
             "epoch": NUM_EPOCHS - 1,
-            "val_aee": log["val_aee"][-1] if log["val_aee"] else float('inf'),
+            "val_aee": log["val_aee"][-1] if log["val_aee"] else float("inf"),
             "spike_thresh": SP_THRESH,
             "image_size": IMAGE_SIZE,
         },
