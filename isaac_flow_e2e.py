@@ -174,9 +174,10 @@ def validate(model, val_loader, device):
     AEE is averaged only over pixels where the accumulated GT magnitude > 0.
     """
     model.eval()
-    aee_total    = 0.0
-    aee_gt_total = 0.0
-    n_samples    = 0
+    aee_total      = 0.0
+    aee_gt_total   = 0.0
+    pred_mag_total = 0.0
+    n_samples      = 0
 
     with torch.no_grad():
         for rgb_tchw, gt_flow_tchw in val_loader:
@@ -221,12 +222,17 @@ def validate(model, val_loader, device):
                 # window); sum gt_flow[1:] to get frame[0]→frame[T-1].
                 gt_total = gt_flow_tchw[b, 1:].sum(dim=0)  # [2, H, W]
 
-                # Resize GT to match model output resolution
+                # Resize GT to match model output resolution and scale
+                # pixel-displacement values proportionally (a displacement of
+                # dx pixels at width W_orig → dx*(W_p/W_orig) at width W_p).
+                H_orig, W_orig = gt_total.shape[1], gt_total.shape[2]
                 H_p, W_p = flow_pred.shape[2], flow_pred.shape[3]
                 gt_resized = F.interpolate(
                     gt_total.unsqueeze(0), size=(H_p, W_p),
                     mode='bilinear', align_corners=True
-                ).squeeze(0)                                # [2, H, W]
+                ).squeeze(0).clone()                        # [2, H_p, W_p]
+                gt_resized[0] *= (W_p / W_orig)             # scale x-component
+                gt_resized[1] *= (H_p / H_orig)             # scale y-component
 
                 # Per-pixel endpoint error
                 diff = flow_pred[0] - gt_resized            # [2, H, W]
@@ -236,14 +242,23 @@ def validate(model, val_loader, device):
                 gt_mag = torch.sqrt(gt_resized[0] ** 2 + gt_resized[1] ** 2)
                 mask   = gt_mag > 0
 
+                pred_mag = torch.sqrt(flow_pred[0, 0] ** 2 + flow_pred[0, 1] ** 2)
                 if mask.sum() > 0:
-                    aee_total    += ee[mask].mean().item()
-                    aee_gt_total += gt_mag[mask].mean().item()
-                    n_samples    += 1
+                    aee_total      += ee[mask].mean().item()
+                    aee_gt_total   += gt_mag[mask].mean().item()
+                    pred_mag_total += pred_mag.mean().item()
+                    n_samples      += 1
 
     model.train()
     n = max(n_samples, 1)
-    return aee_total / n, aee_gt_total / n
+    val_aee    = aee_total    / n
+    val_aee_gt = aee_gt_total / n
+    pred_mag   = pred_mag_total / n
+    print(f"  [validate] n_samples={n_samples}  "
+          f"val_aee={val_aee:.4f}  val_aee_gt={val_aee_gt:.4f}  "
+          f"pred_mag={pred_mag:.4f}  "
+          f"ratio={val_aee / max(val_aee_gt, 1e-6):.3f}")
+    return val_aee, val_aee_gt
 
 
 def main():
@@ -301,7 +316,7 @@ def main():
     # Training loop
     # ------------------------------------------------------------------
     NUM_EPOCHS = 5
-    SMOOTH_WEIGHT = 10.0
+    SMOOTH_WEIGHT = 0.1   # 10.0 dominates early training → zero-flow collapse
     multiscale_weights = [1, 1, 1, 1]
 
     for epoch in range(NUM_EPOCHS):
@@ -397,8 +412,6 @@ def main():
                 log["val_global_step"].append(global_step)
                 log["val_aee"].append(val_aee)
                 log["val_aee_gt"].append(val_aee_gt)
-                print(f"  val_aee={val_aee:.4f}  val_aee_gt={val_aee_gt:.4f}  "
-                      f"ratio={val_aee/val_aee_gt:.3f}")
 
         scheduler.step()
 
@@ -410,8 +423,7 @@ def main():
         log["val_aee"].append(val_aee)
         log["val_aee_gt"].append(val_aee_gt)
         log["val_aee_epoch"].append(epoch)
-        print(f"[epoch end] epoch={epoch}  val_aee={val_aee:.4f}  "
-              f"val_aee_gt={val_aee_gt:.4f}  ratio={val_aee/val_aee_gt:.3f}")
+        print(f"[epoch end] epoch={epoch}")
 
         if val_aee < best_aee:
             best_aee = val_aee
