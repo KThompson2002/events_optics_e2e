@@ -15,7 +15,8 @@ class IsaacFlowSequence(Dataset):
               ground-truth is unavailable for a frame pair)
     """
 
-    def __init__(self, root_dir: str, T: int, stride: int = 1):
+    def __init__(self, root_dir: str, T: int, stride: int = 1,
+                 split: str = 'train', val_frac: float = 0.2):
         self.root_dir = root_dir
         self.T = T
 
@@ -26,7 +27,14 @@ class IsaacFlowSequence(Dataset):
         # Sequence start indices — each sequence is T consecutive frames.
         # Start from index 1 so every frame in the window has a valid flow
         # (frame 0 in the dataset has flow=null).
-        self.starts = list(range(1, len(self.labels) - T + 1, stride))
+        all_starts = list(range(1, len(self.labels) - T + 1, stride))
+
+        # Temporal 80/20 split — last val_frac of sequences become val.
+        n_val = max(1, int(len(all_starts) * val_frac))
+        if split == 'val':
+            self.starts = all_starts[-n_val:]
+        else:
+            self.starts = all_starts[:-n_val]
 
     def __len__(self):
         return len(self.starts)
