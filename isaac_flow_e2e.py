@@ -95,11 +95,13 @@ def compute_photometric_loss_diff(prev_gray, next_gray, flows,
 # Helpers
 # ---------------------------------------------------------------------------
 def rgb_to_gray(video_tchw):
-    """[T, 3, H, W] → [T, H, W]  (luminance, clamped away from zero)."""
+    """[T, 3, H, W] → [T, H, W]  (luminance, not pre-clamped so that
+    per-frame normalization sees true zero for augmentation padding pixels
+    rather than amplifying 1e-6 sentinels to 1.0)."""
     if video_tchw.shape[1] == 1:
         return video_tchw[:, 0]
     r, g, b = video_tchw[:, 0], video_tchw[:, 1], video_tchw[:, 2]
-    return (0.2989 * r + 0.5870 * g + 0.1140 * b).clamp(1e-6, 1.0)
+    return 0.2989 * r + 0.5870 * g + 0.1140 * b
 
 
 IMAGE_SIZE         = 256   # Spike-FlowNet default spatial resolution
@@ -194,9 +196,11 @@ def validate(model, val_loader, device):
                                      mode='bilinear', align_corners=True)
                 gray = gray.squeeze(1)                      # [T, 256, 256]
 
-                # Change 1: per-frame normalize (match Spike-FlowNet preprocessing)
+                # Change 1: per-frame normalize (match Spike-FlowNet: frame/max).
+                # Clamp AFTER dividing so padding-black pixels stay near 0
+                # rather than being amplified to 1.0 by a near-zero frame_max.
                 frame_max = gray.amax(dim=(1, 2), keepdim=True).clamp(min=1e-6)
-                gray = gray / frame_max
+                gray = (gray / frame_max).clamp(0.0, 1.0)
 
                 Epos, Eneg = soft_events(gray, thr=0.1, sharpness=50.0)
 
@@ -322,9 +326,11 @@ def main():
 
                 gray = rgb_to_gray(video)                  # [T, 256, 256]
 
-                # Change 1: per-frame normalize (match Spike-FlowNet: frame/max)
+                # Change 1: per-frame normalize (match Spike-FlowNet: frame/max).
+                # Clamp AFTER dividing so padding-black pixels stay near 0
+                # rather than being amplified to 1.0 by a near-zero frame_max.
                 frame_max = gray.amax(dim=(1, 2), keepdim=True).clamp(min=1e-6)
-                gray = gray / frame_max
+                gray = (gray / frame_max).clamp(0.0, 1.0)
 
                 # --- Differentiable soft events ---
                 Epos, Eneg = soft_events(gray, thr=0.1, sharpness=50.0)
