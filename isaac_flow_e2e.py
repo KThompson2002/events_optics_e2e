@@ -218,9 +218,12 @@ def validate(model, val_loader, device):
                 # Eval mode returns only flow1: [1, 2, H, W]
                 flow_pred = model(spike_in.float(), IMAGE_SIZE, SP_THRESH)
 
-                # Accumulate GT: gt_flow[0] is flow from s-1→s (before our
-                # window); sum gt_flow[1:] to get frame[0]→frame[T-1].
-                gt_total = gt_flow_tchw[b, 1:].sum(dim=0)  # [2, H, W]
+                # Accumulate GT over the same span the model predicts:
+                # frame[0] → frame[half].  gt_flow[0] is pre-window flow;
+                # gt_flow[1..half] are transitions 0→1 … (half-1)→half.
+                T_seq = rgb_tchw.shape[1]
+                half  = (T_seq - 1) // 2                           # 15 for T=32
+                gt_total = gt_flow_tchw[b, 1:half + 1].sum(dim=0) # [2, H, W]
 
                 # Resize GT to match model output resolution and scale
                 # pixel-displacement values proportionally (a displacement of
@@ -268,7 +271,7 @@ def main():
     # ------------------------------------------------------------------
     # Data  (Isaac-Sim optical flow dataset)
     # ------------------------------------------------------------------
-    DATA_ROOT = "/home/lea1212/isaacsim/isaac_flow_data"
+    DATA_ROOT = "/home/lea1212/isaacsim/isaac_flow_data_v2"
     T = 32                       # frames per sequence
     ds_train = IsaacFlowSequence(DATA_ROOT, T=T, stride=1, split='train')
     ds_val   = IsaacFlowSequence(DATA_ROOT, T=T, stride=1, split='val')
@@ -330,6 +333,7 @@ def main():
             losses = []
             photo_losses = []
             smooth_losses = []
+            flow_mags = []
 
             for b in range(B):
                 video = rgb_tchw[b]                        # [T, 3, H, W]
@@ -366,10 +370,17 @@ def main():
                 # --- Forward pass ---
                 flows = model(spike_in.float(), IMAGE_SIZE, SP_THRESH)
                 # flows: (flow1, flow2, flow3, flow4) during training
+                flow1_mag = flows[0].detach().norm(dim=1).mean().item()
 
                 # --- Photometric loss ---
-                prev_gray = gray[0].unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
-                next_gray = gray[-1].unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
+                # The spike input encodes former events (transitions 0→half-1)
+                # and latter events (transitions half→2*half-1), so the model
+                # predicts motion from frame[0] to frame[half].  Using frame[-1]
+                # (31 frames away for T=32) pushes most pixels out of the warp
+                # boundary → zeroed mask → zero gradient → no learning.
+                half = (gray.shape[0] - 1) // 2  # = 15 for T=32
+                prev_gray = gray[0].unsqueeze(0).unsqueeze(0)      # [1,1,H,W]
+                next_gray = gray[half].unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
                 p_loss = compute_photometric_loss_diff(
                     prev_gray, next_gray, flows,
                     weights=multiscale_weights,
@@ -382,6 +393,7 @@ def main():
                 losses.append(loss_b)
                 photo_losses.append(p_loss.detach())
                 smooth_losses.append(s_loss.detach())
+                flow_mags.append(flow1_mag)
 
             # Skip optimizer step if all samples in this batch were filtered
             if not losses:
@@ -404,10 +416,12 @@ def main():
             global_step += 1
 
             if step % 20 == 0:
+                mean_fmag = sum(flow_mags) / max(len(flow_mags), 1)
                 print(f"epoch={epoch}  step={step}  "
                       f"loss={loss.item():.4f}  "
                       f"photo={log['photo_loss'][-1]:.4f}  "
-                      f"smooth={log['smooth_loss'][-1]:.4f}")
+                      f"smooth={log['smooth_loss'][-1]:.4f}  "
+                      f"flow_mag={mean_fmag:.4f}")
                 val_aee, val_aee_gt = validate(model, val_loader, device)
                 log["val_global_step"].append(global_step)
                 log["val_aee"].append(val_aee)
