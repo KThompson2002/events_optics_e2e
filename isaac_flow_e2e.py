@@ -222,10 +222,13 @@ def validate(model, val_loader, device):
                 # Eval mode returns only flow1: [1, 2, H, W]
                 flow_pred = model(events_4ch)
 
-                # Accumulate GT over first half of window (matches training target)
+                # Single-frame GT at the midpoint of the window.
+                # gt_flow[half] is the displacement from frame[half-1]→frame[half],
+                # the boundary between former and latter events — the most natural
+                # instantaneous flow target for the encoded event window.
                 T_seq = rgb_tchw.shape[1]
                 half  = (T_seq - 1) // 2                           # 15 for T=32
-                gt_total = gt_flow_tchw[b, 1:half + 1].sum(dim=0)  # [2, H, W]
+                gt_total = gt_flow_tchw[b, half]                    # [2, H, W]
 
                 # Resize GT to model output resolution and scale pixel values
                 H_orig, W_orig = gt_total.shape[1], gt_total.shape[2]
@@ -289,7 +292,7 @@ def main():
         {'params': model.bias_parameters(), 'weight_decay': 0},
         {'params': model.weight_parameters(), 'weight_decay': 4e-4},
     ]
-    optimizer = torch.optim.Adam(param_groups, lr=1e-4,
+    optimizer = torch.optim.Adam(param_groups, lr=1e-3,
                                  betas=(0.9, 0.999))
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
@@ -316,7 +319,7 @@ def main():
     # ------------------------------------------------------------------
     NUM_EPOCHS = 5
     multiscale_weights = [1, 1, 1, 1]
-    half = (T - 1) // 2     # = 15 for T=32; GT accumulated over frames 0→half
+    half = (T - 1) // 2     # = 15 for T=32; single-frame GT at this midpoint
 
     for epoch in range(NUM_EPOCHS):
         for step, (rgb_tchw, gt_flow_tchw) in enumerate(dl):
@@ -336,10 +339,10 @@ def main():
                 video   = rgb_tchw[b]          # [T, 3, H, W]
                 gt_flow = gt_flow_tchw[b]      # [T, 2, H, W]
 
-                # Accumulate GT displacement over first half of window.
-                # gt_flow[0] is the pre-window frame (no useful flow);
-                # gt_flow[1..half] cover transitions frame[0]→…→frame[half].
-                gt_total = gt_flow[1:half + 1].sum(dim=0)   # [2, H, W]
+                # Single-frame GT at the midpoint — displacement from
+                # frame[half-1] → frame[half], the boundary between former
+                # and latter events.  ~5 px at 320px scale, ~4 px at 256px.
+                gt_total = gt_flow[half]                             # [2, H, W]
 
                 # Augment video and GT consistently (flip only — no rotation).
                 # augment_with_gt also resizes both to IMAGE_SIZE.
@@ -383,6 +386,7 @@ def main():
 
             loss = torch.stack(losses).mean()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             # Logging
