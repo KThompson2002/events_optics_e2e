@@ -12,11 +12,11 @@ import numpy as np
 
 from isaac_flow_sequence import IsaacFlowSequence
 from models.FlowNetS_spike import FlowNetS_spike
-from multiscaleloss import warp, charbonnier_loss, smooth_loss
+from multiscaleloss import charbonnier_loss
 
 
 # ---------------------------------------------------------------------------
-# Differentiable soft-event generation (from gradient_test.py)
+# Differentiable soft-event generation
 # ---------------------------------------------------------------------------
 def soft_events(I, thr=0.1, sharpness=50.0, eps=1e-6):
     """
@@ -69,25 +69,28 @@ def soft_events_to_spike_input(Epos, Eneg, T_bins=5):
 
 
 # ---------------------------------------------------------------------------
-# Differentiable photometric loss  (replaces cv2.resize version)
+# Supervised GT flow loss — Charbonnier at each output scale
 # ---------------------------------------------------------------------------
-def compute_photometric_loss_diff(prev_gray, next_gray, flows,
-                                  weights=(1, 1, 1, 1)):
+def compute_gt_flow_loss(flows, gt_at_image_size, weights=(1, 1, 1, 1)):
     """
-    prev_gray : [B, 1, H, W]  GPU tensor
-    next_gray : [B, 1, H, W]  GPU tensor
-    flows     : tuple of [B, 2, h, w] at decreasing resolutions
-    weights   : per-scale loss weights (highest-res first)
+    flows            : tuple of [1, 2, h, w] at decreasing resolutions
+    gt_at_image_size : [2, IS, IS]  GT flow already scaled to IMAGE_SIZE pixels
+    weights          : per-scale loss weights (highest-res first)
+
+    Resizes GT to each scale and proportionally adjusts pixel-displacement
+    values before computing Charbonnier loss.
     """
     total = 0.0
+    gt = gt_at_image_size.unsqueeze(0)   # [1, 2, IS, IS]
+    IS_h, IS_w = gt.shape[2], gt.shape[3]
     for i, flow in enumerate(flows):
         h, w = flow.shape[2], flow.shape[3]
-        prev_r = F.interpolate(prev_gray, size=(h, w),
-                               mode='bilinear', align_corners=True)
-        next_r = F.interpolate(next_gray, size=(h, w),
-                               mode='bilinear', align_corners=True)
-        warped = warp(next_r, flow)
-        total += weights[len(weights) - 1 - i] * charbonnier_loss(warped - prev_r)
+        gt_r = F.interpolate(gt, size=(h, w),
+                             mode='bilinear', align_corners=True).clone()
+        gt_r[:, 0] *= (w / IS_w)    # scale x-displacement proportionally
+        gt_r[:, 1] *= (h / IS_h)    # scale y-displacement proportionally
+        diff = flow - gt_r
+        total += weights[len(weights) - 1 - i] * charbonnier_loss(diff)
     return total / len(flows)
 
 
@@ -95,9 +98,7 @@ def compute_photometric_loss_diff(prev_gray, next_gray, flows,
 # Helpers
 # ---------------------------------------------------------------------------
 def rgb_to_gray(video_tchw):
-    """[T, 3, H, W] → [T, H, W]  (luminance, not pre-clamped so that
-    per-frame normalization sees true zero for augmentation padding pixels
-    rather than amplifying 1e-6 sentinels to 1.0)."""
+    """[T, 3, H, W] → [T, H, W]  (luminance)."""
     if video_tchw.shape[1] == 1:
         return video_tchw[:, 0]
     r, g, b = video_tchw[:, 0], video_tchw[:, 1], video_tchw[:, 2]
@@ -107,58 +108,65 @@ def rgb_to_gray(video_tchw):
 IMAGE_SIZE         = 256   # Spike-FlowNet default spatial resolution
 T_BINS             = 5     # temporal bins per half
 SP_THRESH          = 0.75  # spiking threshold
-EVENT_THRESH       = 0.5   # sigmoid > EVENT_THRESH → definite event (binarize)
+EVENT_THRESH       = 0.1   # lowered from 0.5 → denser events for sparser scenes
 MIN_EVENT_ACTIVITY = 10.0  # skip sequences with fewer total binary events
 
 
 # ---------------------------------------------------------------------------
-# Consistent geometric augmentation for a full RGB sequence
+# Augmentation: h/v flip only — consistent with GT flow transformation.
+# Rotation and random crop are excluded because they require rotating/warping
+# the GT flow field, which is non-trivial and error-prone.
 # ---------------------------------------------------------------------------
-def augment_sequence(video_tchw):
+def augment_with_gt(video_tchw, gt_flow_hw, image_size):
     """
-    Apply identical random geometric augmentation to every frame in a sequence,
-    matching the transforms used in Spike-FlowNet's Train_loading:
-      RandomHorizontalFlip(0.5), RandomVerticalFlip(0.5),
-      RandomRotation(30), RandomResizedCrop(IMAGE_SIZE, scale=(0.5,1.0))
+    Apply identical h-flip and v-flip to every frame in the sequence AND
+    transform the GT flow consistently.  Then resize both to image_size.
 
-    Using the same sampled parameters for all T frames keeps the event
-    differences (and therefore the spike representation) geometrically
-    consistent with the augmented frames.
+    video_tchw  : [T, 3, H, W]  float32 in [0,1], any device
+    gt_flow_hw  : [2, H, W]     GT accumulated flow in pixel units (same H,W)
+    image_size  : int            target spatial size
 
-    video_tchw : [T, 3, H, W]  float32 in [0, 1], any device
-    returns    : [T, 3, IMAGE_SIZE, IMAGE_SIZE]  same device
+    Returns
+    -------
+    video_aug   : [T, 3, IS, IS]
+    gt_aug      : [2, IS, IS]   pixel units at image_size scale
     """
     T, C, H, W = video_tchw.shape
-
-    # Sample all augmentation parameters once for the whole sequence
     hflip = random.random() < 0.5
     vflip = random.random() < 0.5
-    angle = random.uniform(-30.0, 30.0)
-
-    # RandomResizedCrop: compute a single crop box
-    scale     = random.uniform(0.5, 1.0)
-    ratio     = random.uniform(0.75, 4.0 / 3.0)
-    crop_area = H * W * scale
-    crop_w    = max(1, min(int(round(math.sqrt(crop_area * ratio))), W))
-    crop_h    = max(1, min(int(round(math.sqrt(crop_area / ratio))), H))
-    top       = random.randint(0, H - crop_h)
-    left      = random.randint(0, W - crop_w)
 
     frames = []
     for t in range(T):
-        frame = video_tchw[t]                                   # [3, H, W]
+        frame = video_tchw[t]                                       # [3, H, W]
         if hflip:
             frame = TF.hflip(frame)
         if vflip:
             frame = TF.vflip(frame)
-        frame = TF.rotate(frame, angle,
-                          interpolation=TF.InterpolationMode.BILINEAR)
-        frame = TF.resized_crop(frame, top, left, crop_h, crop_w,
-                                (IMAGE_SIZE, IMAGE_SIZE),
-                                interpolation=TF.InterpolationMode.BILINEAR)
+        frame = F.interpolate(frame.unsqueeze(0),
+                              size=(image_size, image_size),
+                              mode='bilinear',
+                              align_corners=True).squeeze(0)
         frames.append(frame)
+    video_aug = torch.stack(frames, dim=0)                          # [T,3,IS,IS]
 
-    return torch.stack(frames, dim=0)                           # [T, 3, 256, 256]
+    # Transform GT flow to match the same spatial flips
+    gt = gt_flow_hw.unsqueeze(0)                                    # [1, 2, H, W]
+    if hflip:
+        # flip pixels left-right → x-component negates
+        gt = torch.flip(gt, dims=[-1]).clone()
+        gt[:, 0] = -gt[:, 0]
+    if vflip:
+        # flip pixels top-bottom → y-component negates
+        gt = torch.flip(gt, dims=[-2]).clone()
+        gt[:, 1] = -gt[:, 1]
+
+    # Resize and scale pixel displacements proportionally
+    gt = F.interpolate(gt, size=(image_size, image_size),
+                       mode='bilinear', align_corners=True).clone()
+    gt[:, 0] *= (image_size / W)
+    gt[:, 1] *= (image_size / H)
+
+    return video_aug, gt.squeeze(0)                                 # [2, IS, IS]
 
 
 # ---------------------------------------------------------------------------
@@ -166,11 +174,11 @@ def augment_sequence(video_tchw):
 # ---------------------------------------------------------------------------
 def validate(model, val_loader, device):
     """
-    Compute mean AEE over the validation set.
+    Compute mean AEE over the validation set using GT flow supervision.
 
-    GT flow per sample is accumulated across the T-1 consecutive frame-pairs
-    that fall within the window (gt_flow[:,1:,:,:] summed over time), giving
-    an approximate total pixel displacement from frame[0] to frame[T-1].
+    GT flow per sample is accumulated across the first half of the T-frame
+    window (gt_flow[:,1:half+1,:,:] summed over time), giving approximate
+    total pixel displacement from frame[0] to frame[half].
     AEE is averaged only over pixels where the accumulated GT magnitude > 0.
     """
     model.eval()
@@ -181,8 +189,6 @@ def validate(model, val_loader, device):
 
     with torch.no_grad():
         for rgb_tchw, gt_flow_tchw in val_loader:
-            # rgb_tchw      : [B, T, 3, H, W]
-            # gt_flow_tchw  : [B, T, 2, H, W]
             rgb_tchw     = rgb_tchw.to(device, non_blocking=True)
             gt_flow_tchw = gt_flow_tchw.to(device, non_blocking=True)
             B = rgb_tchw.shape[0]
@@ -197,55 +203,44 @@ def validate(model, val_loader, device):
                                      mode='bilinear', align_corners=True)
                 gray = gray.squeeze(1)                      # [T, 256, 256]
 
-                # Change 1: per-frame normalize (match Spike-FlowNet: frame/max).
-                # Clamp AFTER dividing so padding-black pixels stay near 0
-                # rather than being amplified to 1.0 by a near-zero frame_max.
                 frame_max = gray.amax(dim=(1, 2), keepdim=True).clamp(min=1e-6)
                 gray = (gray / frame_max).clamp(0.0, 1.0)
 
                 Epos, Eneg = soft_events(gray, thr=0.1, sharpness=50.0)
 
-                # Change 4: binarize soft events → sparse input matching real event data
                 Epos_bin = (Epos.detach() > EVENT_THRESH).float()
                 Eneg_bin = (Eneg.detach() > EVENT_THRESH).float()
                 spike_in = soft_events_to_spike_input(Epos_bin, Eneg_bin,
                                                       T_bins=T_BINS)
 
-                # Change 2: skip low-activity sequences
                 if spike_in.sum() < MIN_EVENT_ACTIVITY:
                     continue
 
                 # Eval mode returns only flow1: [1, 2, H, W]
                 flow_pred = model(spike_in.float(), IMAGE_SIZE, SP_THRESH)
 
-                # Accumulate GT over the same span the model predicts:
-                # frame[0] → frame[half].  gt_flow[0] is pre-window flow;
-                # gt_flow[1..half] are transitions 0→1 … (half-1)→half.
+                # Accumulate GT over first half of window (matches training target)
                 T_seq = rgb_tchw.shape[1]
                 half  = (T_seq - 1) // 2                           # 15 for T=32
-                gt_total = gt_flow_tchw[b, 1:half + 1].sum(dim=0) # [2, H, W]
+                gt_total = gt_flow_tchw[b, 1:half + 1].sum(dim=0)  # [2, H, W]
 
-                # Resize GT to match model output resolution and scale
-                # pixel-displacement values proportionally (a displacement of
-                # dx pixels at width W_orig → dx*(W_p/W_orig) at width W_p).
+                # Resize GT to model output resolution and scale pixel values
                 H_orig, W_orig = gt_total.shape[1], gt_total.shape[2]
                 H_p, W_p = flow_pred.shape[2], flow_pred.shape[3]
                 gt_resized = F.interpolate(
                     gt_total.unsqueeze(0), size=(H_p, W_p),
                     mode='bilinear', align_corners=True
                 ).squeeze(0).clone()                        # [2, H_p, W_p]
-                gt_resized[0] *= (W_p / W_orig)             # scale x-component
-                gt_resized[1] *= (H_p / H_orig)             # scale y-component
+                gt_resized[0] *= (W_p / W_orig)
+                gt_resized[1] *= (H_p / H_orig)
 
-                # Per-pixel endpoint error
                 diff = flow_pred[0] - gt_resized            # [2, H, W]
                 ee   = torch.sqrt(diff[0] ** 2 + diff[1] ** 2)  # [H, W]
 
-                # Mask to pixels with non-zero accumulated GT
-                gt_mag = torch.sqrt(gt_resized[0] ** 2 + gt_resized[1] ** 2)
-                mask   = gt_mag > 0
-
+                gt_mag   = torch.sqrt(gt_resized[0] ** 2 + gt_resized[1] ** 2)
                 pred_mag = torch.sqrt(flow_pred[0, 0] ** 2 + flow_pred[0, 1] ** 2)
+                mask = gt_mag > 0
+
                 if mask.sum() > 0:
                     aee_total      += ee[mask].mean().item()
                     aee_gt_total   += gt_mag[mask].mean().item()
@@ -257,11 +252,11 @@ def validate(model, val_loader, device):
     val_aee    = aee_total    / n
     val_aee_gt = aee_gt_total / n
     pred_mag   = pred_mag_total / n
+    ratio      = val_aee / max(val_aee_gt, 1e-6)
     print(f"  [validate] n_samples={n_samples}  "
           f"val_aee={val_aee:.4f}  val_aee_gt={val_aee_gt:.4f}  "
-          f"pred_mag={pred_mag:.4f}  "
-          f"ratio={val_aee / max(val_aee_gt, 1e-6):.3f}")
-    return val_aee, val_aee_gt
+          f"pred_mag={pred_mag:.4f}  ratio={ratio:.3f}")
+    return val_aee, val_aee_gt, ratio
 
 
 def main():
@@ -287,7 +282,6 @@ def main():
     model = FlowNetS_spike(batchNorm=False).to(device)
     model.train()
 
-    # Optimizer (same defaults as Spike-FlowNet main_spike_flow_dt1.py)
     param_groups = [
         {'params': model.bias_parameters(), 'weight_decay': 0},
         {'params': model.weight_parameters(), 'weight_decay': 4e-4},
@@ -304,11 +298,10 @@ def main():
     # Logging
     # ------------------------------------------------------------------
     log = {
-        "global_step": [], "loss": [],
-        "photo_loss": [], "smooth_loss": [],
+        "global_step": [], "loss": [], "gt_loss": [],
         "epoch": [], "step": [],
         # validation — one entry per check (every 20 steps + end of epoch)
-        "val_global_step": [], "val_aee": [], "val_aee_gt": [],
+        "val_global_step": [], "val_aee": [], "val_aee_gt": [], "val_ratio": [],
         # epoch-boundary entries (subset of above, for convenience)
         "val_aee_epoch": [],
     }
@@ -319,88 +312,70 @@ def main():
     # Training loop
     # ------------------------------------------------------------------
     NUM_EPOCHS = 5
-    SMOOTH_WEIGHT = 0.1   # 10.0 dominates early training → zero-flow collapse
     multiscale_weights = [1, 1, 1, 1]
+    half = (T - 1) // 2     # = 15 for T=32; GT accumulated over frames 0→half
 
     for epoch in range(NUM_EPOCHS):
-        for step, (rgb_tchw, _gt_pose) in enumerate(dl):
-            # rgb_tchw: [B, T, 3, H, W]
-            rgb_tchw = rgb_tchw.to(device, non_blocking=True)
+        for step, (rgb_tchw, gt_flow_tchw) in enumerate(dl):
+            # rgb_tchw     : [B, T, 3, H, W]
+            # gt_flow_tchw : [B, T, 2, H, W]  GT per-frame displacement (pixel)
+            rgb_tchw     = rgb_tchw.to(device, non_blocking=True)
+            gt_flow_tchw = gt_flow_tchw.to(device, non_blocking=True)
             B = rgb_tchw.shape[0]
 
             optimizer.zero_grad(set_to_none=True)
 
-            losses = []
-            photo_losses = []
-            smooth_losses = []
+            losses    = []
+            gt_losses = []
             flow_mags = []
 
             for b in range(B):
-                video = rgb_tchw[b]                        # [T, 3, H, W]
+                video   = rgb_tchw[b]          # [T, 3, H, W]
+                gt_flow = gt_flow_tchw[b]      # [T, 2, H, W]
 
-                # Change 3: augment all T frames with the same random transform;
-                # augment_sequence also resizes to IMAGE_SIZE so no separate
-                # F.interpolate is needed for the training path.
-                video = augment_sequence(video)            # [T, 3, 256, 256]
+                # Accumulate GT displacement over first half of window.
+                # gt_flow[0] is the pre-window frame (no useful flow);
+                # gt_flow[1..half] cover transitions frame[0]→…→frame[half].
+                gt_total = gt_flow[1:half + 1].sum(dim=0)   # [2, H, W]
 
-                gray = rgb_to_gray(video)                  # [T, 256, 256]
+                # Augment video and GT consistently (flip only — no rotation).
+                # augment_with_gt also resizes both to IMAGE_SIZE.
+                video_aug, gt_aug = augment_with_gt(video, gt_total, IMAGE_SIZE)
 
-                # Change 1: per-frame normalize (match Spike-FlowNet: frame/max).
-                # Clamp AFTER dividing so padding-black pixels stay near 0
-                # rather than being amplified to 1.0 by a near-zero frame_max.
+                gray = rgb_to_gray(video_aug)              # [T, 256, 256]
+
+                # Per-frame normalize to [0,1]
                 frame_max = gray.amax(dim=(1, 2), keepdim=True).clamp(min=1e-6)
                 gray = (gray / frame_max).clamp(0.0, 1.0)
 
-                # --- Differentiable soft events ---
+                # Generate soft events and binarize
                 Epos, Eneg = soft_events(gray, thr=0.1, sharpness=50.0)
-
-                # Change 4: binarize soft events → sparse input matching real
-                # event camera data; detach so no gradient flows through the
-                # step function (model params receive gradient via flows).
                 Epos_bin = (Epos.detach() > EVENT_THRESH).float()
                 Eneg_bin = (Eneg.detach() > EVENT_THRESH).float()
                 spike_in = soft_events_to_spike_input(Epos_bin, Eneg_bin,
                                                       T_bins=T_BINS)
                 # spike_in: [1, 4, 256, 256, T_BINS]
 
-                # Change 2: skip sequences with insufficient event activity
+                # Skip sequences with insufficient event activity
                 if spike_in.sum() < MIN_EVENT_ACTIVITY:
                     continue
 
-                # --- Forward pass ---
+                # Forward pass — returns (flow1, flow2, flow3, flow4) in train
                 flows = model(spike_in.float(), IMAGE_SIZE, SP_THRESH)
-                # flows: (flow1, flow2, flow3, flow4) during training
                 flow1_mag = flows[0].detach().norm(dim=1).mean().item()
 
-                # --- Photometric loss ---
-                # The spike input encodes former events (transitions 0→half-1)
-                # and latter events (transitions half→2*half-1), so the model
-                # predicts motion from frame[0] to frame[half].  Using frame[-1]
-                # (31 frames away for T=32) pushes most pixels out of the warp
-                # boundary → zeroed mask → zero gradient → no learning.
-                half = (gray.shape[0] - 1) // 2  # = 15 for T=32
-                prev_gray = gray[0].unsqueeze(0).unsqueeze(0)      # [1,1,H,W]
-                next_gray = gray[half].unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
-                p_loss = compute_photometric_loss_diff(
-                    prev_gray, next_gray, flows,
-                    weights=multiscale_weights,
-                )
+                # Supervised GT flow loss at all four scales
+                gt_loss = compute_gt_flow_loss(flows, gt_aug,
+                                               weights=multiscale_weights)
 
-                # --- Smoothness loss ---
-                s_loss = smooth_loss(flows)
-
-                loss_b = p_loss + SMOOTH_WEIGHT * s_loss
-                losses.append(loss_b)
-                photo_losses.append(p_loss.detach())
-                smooth_losses.append(s_loss.detach())
+                losses.append(gt_loss)
+                gt_losses.append(gt_loss.detach())
                 flow_mags.append(flow1_mag)
 
-            # Skip optimizer step if all samples in this batch were filtered
             if not losses:
                 continue
 
             loss = torch.stack(losses).mean()
-
             loss.backward()
             optimizer.step()
 
@@ -409,33 +384,30 @@ def main():
             log["epoch"].append(epoch)
             log["step"].append(step)
             log["loss"].append(loss.detach().float().cpu().item())
-            log["photo_loss"].append(
-                torch.stack(photo_losses).mean().float().cpu().item())
-            log["smooth_loss"].append(
-                torch.stack(smooth_losses).mean().float().cpu().item())
+            log["gt_loss"].append(
+                torch.stack(gt_losses).mean().float().cpu().item())
             global_step += 1
 
             if step % 20 == 0:
                 mean_fmag = sum(flow_mags) / max(len(flow_mags), 1)
                 print(f"epoch={epoch}  step={step}  "
                       f"loss={loss.item():.4f}  "
-                      f"photo={log['photo_loss'][-1]:.4f}  "
-                      f"smooth={log['smooth_loss'][-1]:.4f}  "
+                      f"gt_loss={log['gt_loss'][-1]:.4f}  "
                       f"flow_mag={mean_fmag:.4f}")
-                val_aee, val_aee_gt = validate(model, val_loader, device)
+                val_aee, val_aee_gt, val_ratio = validate(model, val_loader, device)
                 log["val_global_step"].append(global_step)
                 log["val_aee"].append(val_aee)
                 log["val_aee_gt"].append(val_aee_gt)
+                log["val_ratio"].append(val_ratio)
 
         scheduler.step()
 
-        # ------------------------------------------------------------------
-        # Validation (once per epoch)
-        # ------------------------------------------------------------------
-        val_aee, val_aee_gt = validate(model, val_loader, device)
+        # Validation at end of epoch
+        val_aee, val_aee_gt, val_ratio = validate(model, val_loader, device)
         log["val_global_step"].append(global_step)
         log["val_aee"].append(val_aee)
         log["val_aee_gt"].append(val_aee_gt)
+        log["val_ratio"].append(val_ratio)
         log["val_aee_epoch"].append(epoch)
         print(f"[epoch end] epoch={epoch}")
 
@@ -461,13 +433,13 @@ def main():
         out_path,
         global_step=np.array(log["global_step"]),
         loss=np.array(log["loss"], dtype=np.float32),
-        photo_loss=np.array(log["photo_loss"], dtype=np.float32),
-        smooth_loss=np.array(log["smooth_loss"], dtype=np.float32),
+        gt_loss=np.array(log["gt_loss"], dtype=np.float32),
         epoch=np.array(log["epoch"]),
         step=np.array(log["step"]),
         val_global_step=np.array(log["val_global_step"]),
         val_aee=np.array(log["val_aee"], dtype=np.float32),
         val_aee_gt=np.array(log["val_aee_gt"], dtype=np.float32),
+        val_ratio=np.array(log["val_ratio"], dtype=np.float32),
         val_aee_epoch=np.array(log["val_aee_epoch"]),
     )
     print(f"Saved training logs to {out_path}")
