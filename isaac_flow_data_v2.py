@@ -45,6 +45,11 @@ import math
 import numpy as np
 
 from isaacsim import SimulationApp
+
+# Resolve the Isaac Sim install root from the environment, falling back to the
+# known install location.  os.path.expandvars handles ${VAR} syntax but only
+# works if the variable is actually exported; the fallback covers the case
+# where the shell sets it implicitly via the isaacsim launcher script.
 _ISAAC_ROOT = os.path.expandvars(
     os.environ.get("ISAAC_SIM_PATH", "/home/lea1212/isaacsim")
 )
@@ -358,14 +363,8 @@ def main():
             if mv.shape[0] == W and mv.shape[1] == H:
                 mv = np.transpose(mv, (1, 0, 2))
 
-            # flow_ndc = mv[:, :, :2].astype(np.float32)
-
-            # NDC → pixel conversion
-            # Omniverse convention: ±1 NDC spans the full image dimension.
-            #   pixel_x = NDC_x * (W / 2)
-            #   pixel_y = NDC_y * (H / 2)
-            # If diagnostics below show magnitude ~0.01-0.05 (still NDC scale),
-            # change to:  flow_ndc * np.array([W, H])  and re-generate.
+            # The motion_vectors annotator already returns pixel displacements.
+            # No conversion needed — use the raw values directly.
             flow_xy = mv[:, :, :2].astype(np.float32)
             np.save(os.path.join(OUT_DIR, "flow", f"{i:06d}.npy"), flow_xy)
             flow_path = f"flow/{i:06d}.npy"
@@ -374,10 +373,9 @@ def main():
             flow_mags.append(mag)
 
             if i <= 5 or i % 50 == 0:
-                # ndc_abs_max = float(np.abs(flow_ndc).max())
                 print(f"  frame {i:04d} | "
-                      f"flow_mag = {mag:.3f} px  " 
-                      f"{'[OK]' if 1.0 < mag < 15.0 else '[CHECK SCALE]'}")  
+                      f"flow_mag = {mag:.3f} px  "
+                      f"{'[OK]' if 1.0 < mag < 15.0 else '[CHECK SCALE]'}")
 
         # ── Metadata ─────────────────────────────────────────────────────────
         cam_t, cam_q_world = get_world_transform("/World/Camera")

@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # -------- CONFIG --------
-npz_path = "train_log_flow_2.npz"
+npz_path = "train_log_flow.npz"
 # ------------------------
 
 data = np.load(npz_path)
@@ -10,8 +10,7 @@ data = np.load(npz_path)
 # Training metrics (one entry per optimizer step)
 global_step = data["global_step"]
 loss        = data["loss"]
-photo_loss  = data["photo_loss"]
-smooth_loss = data["smooth_loss"]
+gt_loss     = data["gt_loss"]
 epoch       = data["epoch"]
 step        = data["step"]
 
@@ -25,9 +24,11 @@ print("=== Loaded arrays ===")
 for k in data.files:
     print(f"  {k}: shape={data[k].shape}  dtype={data[k].dtype}")
 
-# Compute AEE ratio (how much better than predicting zero flow)
-# ratio < 1.0 means the model is beating the zero-flow baseline
-val_ratio = val_aee / np.maximum(val_aee_gt, 1e-6)
+# AEE ratio — saved directly by training script; load if present, else compute
+if "val_ratio" in data.files:
+    val_ratio = data["val_ratio"]
+else:
+    val_ratio = val_aee / np.maximum(val_aee_gt, 1e-6)
 
 # Identify epoch-boundary validation steps for vertical markers.
 # val_aee_epoch stores the epoch index at each epoch-end call; the
@@ -57,14 +58,13 @@ ax.legend()
 ax.grid(True)
 
 ax = axes[1]
-ax.plot(global_step, photo_loss,  label="photometric", linewidth=1.0)
-ax.plot(global_step, smooth_loss, label="smoothness",  linewidth=1.0)
+ax.plot(global_step, gt_loss, label="GT flow loss", linewidth=1.0, color="C1")
 for gs in epoch_boundary_steps:
     ax.axvline(gs, color="gray", linestyle="--", linewidth=0.7, alpha=0.6,
                label="_epoch" if gs == epoch_boundary_steps[0] else None)
 ax.set_xlabel("Global step")
 ax.set_ylabel("Loss")
-ax.set_title("Loss Components  (dashed = epoch boundary)")
+ax.set_title("GT Supervised Loss  (dashed = epoch boundary)")
 ax.legend()
 ax.grid(True)
 
@@ -121,13 +121,12 @@ ax.set_xlabel("Global step")
 ax.set_ylabel("Loss")
 ax.grid(True)
 
-# Top-right: loss components
+# Top-right: GT supervised loss
 ax = axes[0, 1]
-ax.plot(global_step, photo_loss,  label="photo",  linewidth=1.0, color="C1")
-ax.plot(global_step, smooth_loss, label="smooth", linewidth=1.0, color="C3")
+ax.plot(global_step, gt_loss, label="GT flow loss", linewidth=1.0, color="C1")
 for gs in epoch_boundary_steps:
     ax.axvline(gs, color="gray", linestyle="--", linewidth=0.7, alpha=0.5)
-ax.set_title("Loss Components")
+ax.set_title("GT Supervised Loss")
 ax.set_xlabel("Global step")
 ax.set_ylabel("Loss")
 ax.legend()

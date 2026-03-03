@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 
 from isaac_flow_sequence import IsaacFlowSequence
-from models.FlowNetS_spike import FlowNetS_spike
+from flow_net_events import FlowNetEvents
 from multiscaleloss import charbonnier_loss
 
 
@@ -216,8 +216,11 @@ def validate(model, val_loader, device):
                 if spike_in.sum() < MIN_EVENT_ACTIVITY:
                     continue
 
+                # Collapse temporal bins → [1, 4, H, W]  (sum over T_bins dim)
+                events_4ch = spike_in.sum(dim=-1)   # [1, 4, H, W]
+
                 # Eval mode returns only flow1: [1, 2, H, W]
-                flow_pred = model(spike_in.float(), IMAGE_SIZE, SP_THRESH)
+                flow_pred = model(events_4ch)
 
                 # Accumulate GT over first half of window (matches training target)
                 T_seq = rgb_tchw.shape[1]
@@ -277,16 +280,16 @@ def main():
     print(f"Dataset split — train: {len(ds_train)}, val: {len(ds_val)}")
 
     # ------------------------------------------------------------------
-    # Spike-FlowNet model
+    # Event flow model  (ANN — clean gradient flow to all encoder layers)
     # ------------------------------------------------------------------
-    model = FlowNetS_spike(batchNorm=False).to(device)
+    model = FlowNetEvents(batchNorm=True).to(device)
     model.train()
 
     param_groups = [
         {'params': model.bias_parameters(), 'weight_decay': 0},
         {'params': model.weight_parameters(), 'weight_decay': 4e-4},
     ]
-    optimizer = torch.optim.Adam(param_groups, lr=2e-5,
+    optimizer = torch.optim.Adam(param_groups, lr=1e-4,
                                  betas=(0.9, 0.999))
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
@@ -360,8 +363,11 @@ def main():
                 if spike_in.sum() < MIN_EVENT_ACTIVITY:
                     continue
 
+                # Collapse temporal bins → [1, 4, H, W]  (sum over T_bins dim)
+                events_4ch = spike_in.sum(dim=-1)   # [1, 4, H, W]
+
                 # Forward pass — returns (flow1, flow2, flow3, flow4) in train
-                flows = model(spike_in.float(), IMAGE_SIZE, SP_THRESH)
+                flows = model(events_4ch)
                 flow1_mag = flows[0].detach().norm(dim=1).mean().item()
 
                 # Supervised GT flow loss at all four scales
@@ -418,10 +424,9 @@ def main():
                     "state_dict": model.state_dict(),
                     "epoch": epoch,
                     "val_aee": val_aee,
-                    "spike_thresh": SP_THRESH,
                     "image_size": IMAGE_SIZE,
                 },
-                "spike_flownet_senpi_best.pth",
+                "flow_net_events_best.pth",
             )
             print(f"  => saved best checkpoint (val_aee={best_aee:.4f})")
 
@@ -448,10 +453,9 @@ def main():
             "state_dict": model.state_dict(),
             "epoch": NUM_EPOCHS - 1,
             "val_aee": log["val_aee"][-1] if log["val_aee"] else float("inf"),
-            "spike_thresh": SP_THRESH,
             "image_size": IMAGE_SIZE,
         },
-        "spike_flownet_senpi_final.pth",
+        "flow_net_events_final.pth",
     )
     print(f"Best val AEE: {best_aee:.4f}  (checkpoint: spike_flownet_senpi_best.pth)")
     print("Done.")
