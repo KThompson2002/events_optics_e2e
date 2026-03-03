@@ -45,15 +45,107 @@ import math
 import numpy as np
 
 from isaacsim import SimulationApp
-simulation_app = SimulationApp({"headless": True})
+
+# Resolve the Isaac Sim install root from the environment, falling back to the
+# known install location.  os.path.expandvars handles ${VAR} syntax but only
+# works if the variable is actually exported; the fallback covers the case
+# where the shell sets it implicitly via the isaacsim launcher script.
+_ISAAC_ROOT = os.path.expandvars(
+    os.environ.get("ISAAC_SIM_PATH", "/home/lea1212/isaacsim")
+)
+_KIT = os.path.join(
+    _ISAAC_ROOT, "apps",
+    "isaacsim.exp.action_and_event_data_generation.base.kit",
+)
+
+simulation_app = SimulationApp({
+    "headless":   True,
+    # Data-generation experience: has rendering annotators (LdrColor,
+    # motion_vectors) but skips the MJCF/URDF robot-import extensions
+    # that crash on startup in Isaac Sim 5.0.0-rc.
+    # To also enable the WebRTC streamer swap the kit for:
+    #   isaacsim.exp.full.streaming.kit
+    "experience": _KIT,
+})
 
 import omni.usd
 import omni.replicator.core as rep
 from pxr import UsdGeom, UsdShade, Sdf, Gf, UsdLux
 
-from isaac_flow_data import (
-    ensure_dir, set_xform, set_scale, get_world_transform, look_at_quat,
-)
+# ── Helpers (inlined from isaac_flow_data.py to avoid a second SimulationApp
+#    init that would occur if we imported that module at the top level) ───────
+
+def ensure_dir(p):
+    os.makedirs(p, exist_ok=True)
+
+
+def set_xform(prim, t_xyz, quat_wxyz):
+    xform = UsdGeom.Xformable(prim)
+    ops = xform.GetOrderedXformOps()
+    if not ops:
+        xform.AddXformOp(UsdGeom.XformOp.TypeTranslate)
+        xform.AddXformOp(UsdGeom.XformOp.TypeOrient)
+        ops = xform.GetOrderedXformOps()
+    ops[0].Set(Gf.Vec3d(*t_xyz))
+    w, x, y, z = quat_wxyz
+    ops[1].Set(Gf.Quatd(w, Gf.Vec3d(x, y, z)))
+
+
+def set_scale(prim, sx, sy, sz):
+    xform = UsdGeom.Xformable(prim)
+    ops = xform.GetOrderedXformOps()
+    has_scale = any(op.GetOpType() == UsdGeom.XformOp.TypeScale for op in ops)
+    if not has_scale:
+        xform.AddXformOp(UsdGeom.XformOp.TypeScale)
+        ops = xform.GetOrderedXformOps()
+    for op in ops:
+        if op.GetOpType() == UsdGeom.XformOp.TypeScale:
+            op.Set(Gf.Vec3d(sx, sy, sz))
+            break
+
+
+def get_world_transform(prim_path: str):
+    stage = omni.usd.get_context().get_stage()
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        raise RuntimeError(f"Prim not found: {prim_path}")
+    xform = UsdGeom.Xformable(prim)
+    cache = UsdGeom.XformCache()
+    mat = cache.GetLocalToWorldTransform(xform.GetPrim())
+    t = mat.ExtractTranslation()
+    q = mat.ExtractRotationQuat()
+    imag = q.GetImaginary()
+    w = q.GetReal()
+    return (
+        np.array([t[0], t[1], t[2]], np.float32),
+        np.array([w, imag[0], imag[1], imag[2]], np.float32),
+    )
+
+
+def look_at_quat(eye, target, up=(0.0, 0.0, 1.0)):
+    """Return (w, x, y, z) quaternion so camera at *eye* looks toward *target*."""
+    eye    = np.asarray(eye,    dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    up     = np.asarray(up,     dtype=np.float64)
+    fwd   = target - eye;  fwd   /= np.linalg.norm(fwd)   + 1e-12
+    right = np.cross(fwd, up);  right /= np.linalg.norm(right) + 1e-12
+    new_up = np.cross(right, fwd)
+    R  = np.stack([right, new_up, -fwd], axis=1)
+    tr = R[0, 0] + R[1, 1] + R[2, 2]
+    if tr > 0:
+        s = 0.5 / math.sqrt(tr + 1.0)
+        w = 0.25 / s;  x = (R[2,1]-R[1,2])*s;  y = (R[0,2]-R[2,0])*s;  z = (R[1,0]-R[0,1])*s
+    elif R[0,0] > R[1,1] and R[0,0] > R[2,2]:
+        s = 2.0 * math.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2])
+        w = (R[2,1]-R[1,2])/s;  x = 0.25*s;  y = (R[0,1]+R[1,0])/s;  z = (R[0,2]+R[2,0])/s
+    elif R[1,1] > R[2,2]:
+        s = 2.0 * math.sqrt(1.0 + R[1,1] - R[0,0] - R[2,2])
+        w = (R[0,2]-R[2,0])/s;  x = (R[0,1]+R[1,0])/s;  y = 0.25*s;  z = (R[1,2]+R[2,1])/s
+    else:
+        s = 2.0 * math.sqrt(1.0 + R[2,2] - R[0,0] - R[1,1])
+        w = (R[1,0]-R[0,1])/s;  x = (R[0,2]+R[2,0])/s;  y = (R[1,2]+R[2,1])/s;  z = 0.25*s
+    q = np.array([w, x, y, z]);  q /= np.linalg.norm(q)
+    return tuple(q.tolist())
 
 
 # ── Material helpers ─────────────────────────────────────────────────────────
@@ -198,7 +290,7 @@ def main():
     W, H       = RES
 
     # Camera orbit / radial parameters
-    N_ORBITS   = 5               # full turns around the box in N frames
+    N_ORBITS   = 3               # full turns around the box in N frames
     N_RADIAL   = 3               # radial oscillations in N frames
     #   incommensurate ratio ↑ mixes turning & forward motion smoothly
     R0         = 2.5             # base orbit radius (m)
@@ -271,15 +363,9 @@ def main():
             if mv.shape[0] == W and mv.shape[1] == H:
                 mv = np.transpose(mv, (1, 0, 2))
 
-            flow_ndc = mv[:, :, :2].astype(np.float32)
-
-            # NDC → pixel conversion
-            # Omniverse convention: ±1 NDC spans the full image dimension.
-            #   pixel_x = NDC_x * (W / 2)
-            #   pixel_y = NDC_y * (H / 2)
-            # If diagnostics below show magnitude ~0.01-0.05 (still NDC scale),
-            # change to:  flow_ndc * np.array([W, H])  and re-generate.
-            flow_xy = flow_ndc * np.array([W / 2.0, H / 2.0], dtype=np.float32)
+            # The motion_vectors annotator already returns pixel displacements.
+            # No conversion needed — use the raw values directly.
+            flow_xy = mv[:, :, :2].astype(np.float32)
             np.save(os.path.join(OUT_DIR, "flow", f"{i:06d}.npy"), flow_xy)
             flow_path = f"flow/{i:06d}.npy"
 
@@ -287,11 +373,9 @@ def main():
             flow_mags.append(mag)
 
             if i <= 5 or i % 50 == 0:
-                ndc_abs_max = float(np.abs(flow_ndc).max())
                 print(f"  frame {i:04d} | "
-                      f"flow_mag = {mag:.3f} px | "
-                      f"max |NDC| = {ndc_abs_max:.5f}  "
-                      f"{'[OK]' if 1.0 < mag < 20.0 else '[CHECK SCALE]'}")
+                      f"flow_mag = {mag:.3f} px  "
+                      f"{'[OK]' if 1.0 < mag < 15.0 else '[CHECK SCALE]'}")
 
         # ── Metadata ─────────────────────────────────────────────────────────
         cam_t, cam_q_world = get_world_transform("/World/Camera")
