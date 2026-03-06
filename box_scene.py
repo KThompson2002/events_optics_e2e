@@ -92,6 +92,38 @@ def _camera_R(cam_fwd: np.ndarray, cam_up: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Floor geometry (checkerboard so cameras always have textured features)
+# ---------------------------------------------------------------------------
+FLOOR_Y      = -0.8    # world y of the floor plane
+FLOOR_EXTENT = 5.0     # floor runs ±FLOOR_EXTENT in x and z
+FLOOR_N      = 8       # tiles per side  →  8×8 = 64 tiles total
+_TILE_COLORS = [np.array([0.72, 0.72, 0.72]),   # light grey
+                np.array([0.32, 0.32, 0.40])]   # dark grey-blue
+
+
+def _floor_tiles():
+    """Pre-compute the 4 world-space corners of every floor tile."""
+    tile = 2.0 * FLOOR_EXTENT / FLOOR_N
+    tiles = []
+    for ix in range(FLOOR_N):
+        for iz in range(FLOOR_N):
+            x0 = -FLOOR_EXTENT + ix * tile
+            z0 = -FLOOR_EXTENT + iz * tile
+            verts = np.array([
+                [x0,        FLOOR_Y, z0],
+                [x0 + tile, FLOOR_Y, z0],
+                [x0 + tile, FLOOR_Y, z0 + tile],
+                [x0,        FLOOR_Y, z0 + tile],
+            ])
+            color = _TILE_COLORS[(ix + iz) % 2].copy()
+            tiles.append((verts, color))
+    return tiles
+
+
+_FLOOR_TILES = _floor_tiles()          # computed once at import time
+
+
+# ---------------------------------------------------------------------------
 # Renderer
 # ---------------------------------------------------------------------------
 
@@ -140,6 +172,24 @@ def render_frame(cam_pos: np.ndarray, cam_R: np.ndarray,
         # Mild diffuse shading: faces closer look brighter
         shade = np.clip(0.4 + 0.6 * np.exp(-0.3 * (centroid_z - 1.0)), 0.35, 1.0)
         visible.append((centroid_z, pts_img, color * shade))
+
+    # Floor tiles — only when camera is above the floor plane
+    if cam_pos[1] > FLOOR_Y:
+        for tile_verts_w, tile_color in _FLOOR_TILES:
+            pts_c      = (R_wc @ (tile_verts_w - cam_pos).T).T   # [4, 3]
+            centroid_z = pts_c[:, 2].mean()
+            if centroid_z <= 0.05:
+                continue
+            u = f * pts_c[:, 0] / pts_c[:, 2] + cx
+            v = -f * pts_c[:, 1] / pts_c[:, 2] + cy
+            pts_img = np.column_stack([u, v])
+            # Cull tiles whose projected area is degenerate (all off-screen)
+            if pts_img[:, 0].max() < 0 or pts_img[:, 0].min() > W:
+                continue
+            if pts_img[:, 1].max() < 0 or pts_img[:, 1].min() > H:
+                continue
+            shade = np.clip(0.3 + 0.7 * np.exp(-0.15 * (centroid_z - 1.0)), 0.25, 1.0)
+            visible.append((centroid_z, pts_img, tile_color * shade))
 
     # Painter's: back-to-front
     img = np.full((H, W, 3), 0.12, dtype=np.float32)       # dark background
