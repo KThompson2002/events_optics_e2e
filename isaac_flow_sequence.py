@@ -29,12 +29,26 @@ class IsaacFlowSequence(Dataset):
         # (frame 0 in the dataset has flow=null).
         all_starts = list(range(1, len(self.labels) - T + 1, stride))
 
-        # Temporal 80/20 split — last val_frac of sequences become val.
-        n_val = max(1, int(len(all_starts) * val_frac))
+        # Drop sequences that cross a segment boundary (the camera teleports
+        # between trajectory segments, making those sequences invalid).
+        # Segment boundaries are detected via the optional 'segment_id' field.
+        if self.labels and 'segment_id' in self.labels[0]:
+            all_starts = [
+                s for s in all_starts
+                if self.labels[s]['segment_id'] ==
+                   self.labels[s + T - 1]['segment_id']
+            ]
+
+        # Strided interleaved split — every val_stride-th sequence → val.
+        # This spreads validation samples evenly across the full trajectory
+        # rather than concentrating them all at the end (temporal split).
+        val_stride = max(2, round(1.0 / val_frac))   # e.g. 5 for val_frac=0.2
         if split == 'val':
-            self.starts = all_starts[-n_val:]
+            self.starts = [s for i, s in enumerate(all_starts)
+                           if i % val_stride == 0]
         else:
-            self.starts = all_starts[:-n_val]
+            self.starts = [s for i, s in enumerate(all_starts)
+                           if i % val_stride != 0]
 
     def __len__(self):
         return len(self.starts)

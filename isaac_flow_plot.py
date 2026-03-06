@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # -------- CONFIG --------
-npz_path = "train_log_flow.npz"
+npz_path = "train_log_flow_3.npz"
 # ------------------------
 
 data = np.load(npz_path)
@@ -11,14 +11,16 @@ data = np.load(npz_path)
 global_step = data["global_step"]
 loss        = data["loss"]
 gt_loss     = data["gt_loss"]
+flow_mag    = data["flow_mag"]   if "flow_mag"    in data.files else None
 epoch       = data["epoch"]
 step        = data["step"]
 
 # Validation metrics (one entry per validation check: every 20 steps + epoch end)
-val_gs      = data["val_global_step"]
-val_aee     = data["val_aee"]
-val_aee_gt  = data["val_aee_gt"]
-val_epoch   = data["val_aee_epoch"]   # epoch indices of epoch-end checks
+val_gs       = data["val_global_step"]
+val_aee      = data["val_aee"]
+val_aee_gt   = data["val_aee_gt"]
+val_epoch    = data["val_aee_epoch"]
+val_pred_mag = data["val_pred_mag"] if "val_pred_mag" in data.files else None
 
 print("=== Loaded arrays ===")
 for k in data.files:
@@ -43,10 +45,11 @@ if len(epoch) > 1:
             epoch_boundary_steps.append(global_step[i])
 
 # ================================================================
-# Figure 1 — Training losses
+# Figure 1 — Training losses + predicted flow magnitude
 # ================================================================
-fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
-fig.suptitle("Training Losses")
+n_train_rows = 3 if flow_mag is not None else 2
+fig, axes = plt.subplots(n_train_rows, 1, figsize=(10, 4 * n_train_rows), sharex=True)
+fig.suptitle("Training Metrics")
 
 ax = axes[0]
 ax.plot(global_step, loss, label="total loss", linewidth=1.0)
@@ -62,11 +65,23 @@ ax.plot(global_step, gt_loss, label="GT flow loss", linewidth=1.0, color="C1")
 for gs in epoch_boundary_steps:
     ax.axvline(gs, color="gray", linestyle="--", linewidth=0.7, alpha=0.6,
                label="_epoch" if gs == epoch_boundary_steps[0] else None)
-ax.set_xlabel("Global step")
 ax.set_ylabel("Loss")
 ax.set_title("GT Supervised Loss  (dashed = epoch boundary)")
 ax.legend()
 ax.grid(True)
+
+if flow_mag is not None:
+    ax = axes[2]
+    ax.plot(global_step, flow_mag, label="train flow_mag", linewidth=1.0, color="C4")
+    for gs in epoch_boundary_steps:
+        ax.axvline(gs, color="gray", linestyle="--", linewidth=0.7, alpha=0.6)
+    ax.set_xlabel("Global step")
+    ax.set_ylabel("Pixels")
+    ax.set_title("Training Predicted Flow Magnitude")
+    ax.legend()
+    ax.grid(True)
+else:
+    axes[-1].set_xlabel("Global step")
 
 plt.tight_layout()
 plt.savefig("plot_train_losses.png", dpi=150)
@@ -79,9 +94,12 @@ fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
 fig.suptitle("Validation AEE")
 
 ax = axes[0]
-ax.plot(val_gs, val_aee,    label="val AEE",         linewidth=1.5, marker="o", markersize=3)
+ax.plot(val_gs, val_aee,    label="val AEE",          linewidth=1.5, marker="o", markersize=3)
 ax.plot(val_gs, val_aee_gt, label="GT mag (baseline)", linewidth=1.0,
         linestyle="--", color="gray")
+if val_pred_mag is not None:
+    ax.plot(val_gs, val_pred_mag, label="pred mag", linewidth=1.0,
+            linestyle=":", color="C4", marker="s", markersize=2)
 for gs in epoch_boundary_steps:
     ax.axvline(gs, color="gray", linestyle=":", linewidth=0.7, alpha=0.6)
 ax.set_ylabel("Pixels")
@@ -136,6 +154,9 @@ ax.grid(True)
 ax = axes[1, 0]
 ax.plot(val_gs, val_aee,    label="val AEE",    linewidth=1.5, marker="o", markersize=3, color="C0")
 ax.plot(val_gs, val_aee_gt, label="GT baseline", linewidth=1.0, linestyle="--", color="gray")
+if val_pred_mag is not None:
+    ax.plot(val_gs, val_pred_mag, label="pred mag", linewidth=1.0,
+            linestyle=":", color="C4", marker="s", markersize=2)
 for gs in epoch_boundary_steps:
     ax.axvline(gs, color="gray", linestyle=":", linewidth=0.7, alpha=0.5)
 ax.set_title("Validation AEE")

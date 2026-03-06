@@ -262,7 +262,7 @@ def validate(model, val_loader, device):
     print(f"  [validate] n_samples={n_samples}  "
           f"val_aee={val_aee:.4f}  val_aee_gt={val_aee_gt:.4f}  "
           f"pred_mag={pred_mag:.4f}  ratio={ratio:.3f}")
-    return val_aee, val_aee_gt, ratio
+    return val_aee, val_aee_gt, ratio, pred_mag
 
 
 def main():
@@ -272,7 +272,7 @@ def main():
     # ------------------------------------------------------------------
     # Data  (Isaac-Sim optical flow dataset)
     # ------------------------------------------------------------------
-    DATA_ROOT = "/home/lea1212/isaacsim/isaac_flow_data_v2"
+    DATA_ROOT = "/home/lea1212/isaacsim/isaac_flow_data_v3"
     T = 32                       # frames per sequence
     ds_train = IsaacFlowSequence(DATA_ROOT, T=T, stride=1, split='train')
     ds_val   = IsaacFlowSequence(DATA_ROOT, T=T, stride=1, split='val')
@@ -304,10 +304,11 @@ def main():
     # Logging
     # ------------------------------------------------------------------
     log = {
-        "global_step": [], "loss": [], "gt_loss": [],
+        "global_step": [], "loss": [], "gt_loss": [], "flow_mag": [],
         "epoch": [], "step": [],
         # validation — one entry per check (every 20 steps + end of epoch)
-        "val_global_step": [], "val_aee": [], "val_aee_gt": [], "val_ratio": [],
+        "val_global_step": [], "val_aee": [], "val_aee_gt": [],
+        "val_ratio": [], "val_pred_mag": [],
         # epoch-boundary entries (subset of above, for convenience)
         "val_aee_epoch": [],
     }
@@ -396,28 +397,31 @@ def main():
             log["loss"].append(loss.detach().float().cpu().item())
             log["gt_loss"].append(
                 torch.stack(gt_losses).mean().float().cpu().item())
+            mean_fmag = sum(flow_mags) / max(len(flow_mags), 1)
+            log["flow_mag"].append(mean_fmag)
             global_step += 1
 
             if step % 20 == 0:
-                mean_fmag = sum(flow_mags) / max(len(flow_mags), 1)
                 print(f"epoch={epoch}  step={step}  "
                       f"loss={loss.item():.4f}  "
                       f"gt_loss={log['gt_loss'][-1]:.4f}  "
                       f"flow_mag={mean_fmag:.4f}")
-                val_aee, val_aee_gt, val_ratio = validate(model, val_loader, device)
+                val_aee, val_aee_gt, val_ratio, val_pred_mag = validate(model, val_loader, device)
                 log["val_global_step"].append(global_step)
                 log["val_aee"].append(val_aee)
                 log["val_aee_gt"].append(val_aee_gt)
                 log["val_ratio"].append(val_ratio)
+                log["val_pred_mag"].append(val_pred_mag)
 
         scheduler.step()
 
         # Validation at end of epoch
-        val_aee, val_aee_gt, val_ratio = validate(model, val_loader, device)
+        val_aee, val_aee_gt, val_ratio, val_pred_mag = validate(model, val_loader, device)
         log["val_global_step"].append(global_step)
         log["val_aee"].append(val_aee)
         log["val_aee_gt"].append(val_aee_gt)
         log["val_ratio"].append(val_ratio)
+        log["val_pred_mag"].append(val_pred_mag)
         log["val_aee_epoch"].append(epoch)
         print(f"[epoch end] epoch={epoch}")
 
@@ -443,12 +447,14 @@ def main():
         global_step=np.array(log["global_step"]),
         loss=np.array(log["loss"], dtype=np.float32),
         gt_loss=np.array(log["gt_loss"], dtype=np.float32),
+        flow_mag=np.array(log["flow_mag"], dtype=np.float32),
         epoch=np.array(log["epoch"]),
         step=np.array(log["step"]),
         val_global_step=np.array(log["val_global_step"]),
         val_aee=np.array(log["val_aee"], dtype=np.float32),
         val_aee_gt=np.array(log["val_aee_gt"], dtype=np.float32),
         val_ratio=np.array(log["val_ratio"], dtype=np.float32),
+        val_pred_mag=np.array(log["val_pred_mag"], dtype=np.float32),
         val_aee_epoch=np.array(log["val_aee_epoch"]),
     )
     print(f"Saved training logs to {out_path}")
