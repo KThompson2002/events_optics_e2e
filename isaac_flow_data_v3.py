@@ -130,10 +130,13 @@ def look_at_quat(eye, target, up=(0.0, 0.0, 1.0)):
 def make_color_material(stage, path: str, rgb: tuple) -> UsdShade.Material:
     mat = UsdShade.Material.Define(stage, path)
     shader = UsdShade.Shader.Define(stage, path + "/Shader")
-    shader.CreateIdAttr("UsdPreviewSurface")
-    shader.CreateInput("diffuseColor",
+    # OmniPBR is Isaac Sim's native shader — renders correctly in all kit modes
+    # including headless data-generation kits that don't run full RTX.
+    shader.CreateIdAttr("OmniPBR")
+    shader.CreateInput("diffuse_color_constant",
                        Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*rgb))
-    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.9)
+    shader.CreateInput("reflection_roughness_constant",
+                       Sdf.ValueTypeNames.Float).Set(0.9)
     mat.CreateSurfaceOutput().ConnectToSource(
         shader.ConnectableAPI(), "surface")
     return mat
@@ -170,17 +173,119 @@ def add_checkerboard_face(stage, path_prefix, mat_a, mat_b,
             panel_idx += 1
 
 
+def add_bumps_to_face(stage, path_prefix, mat, center_xyz, right_axis, up_axis,
+                      face_size=2.0, n_bumps=3, bump_size=0.18, bump_depth=0.15):
+    """
+    Add a grid of n_bumps × n_bumps protruding cubes to a box face.
+    Bumps create depth discontinuities — sharp flow boundaries at their edges
+    and parallax against the flat face behind them.
+    """
+    step = face_size / (n_bumps + 1)
+    # Outward normal = right × up
+    nx = right_axis[1]*up_axis[2] - right_axis[2]*up_axis[1]
+    ny = right_axis[2]*up_axis[0] - right_axis[0]*up_axis[2]
+    nz = right_axis[0]*up_axis[1] - right_axis[1]*up_axis[0]
+
+    for idx, (row, col) in enumerate(
+            [(r, c) for r in range(n_bumps) for c in range(n_bumps)]):
+        u = (col - (n_bumps - 1) / 2.0) * step
+        v = (row - (n_bumps - 1) / 2.0) * step
+        # Centre of bump sits half its depth past the face surface
+        cx = center_xyz[0] + u*right_axis[0] + v*up_axis[0] + (bump_depth/2)*nx
+        cy = center_xyz[1] + u*right_axis[1] + v*up_axis[1] + (bump_depth/2)*ny
+        cz = center_xyz[2] + u*right_axis[2] + v*up_axis[2] + (bump_depth/2)*nz
+
+        prim = UsdGeom.Cube.Define(stage, f"{path_prefix}/Bump_{idx:03d}").GetPrim()
+        set_xform(prim, t_xyz=(cx, cy, cz), quat_wxyz=(1, 0, 0, 0))
+
+        # Along the normal axis → bump_depth/2; along face axes → bump_size/2
+        scale_x = bump_size/2 if (right_axis[0] != 0 or up_axis[0] != 0) else bump_depth/2
+        scale_y = bump_size/2 if (right_axis[1] != 0 or up_axis[1] != 0) else bump_depth/2
+        scale_z = bump_size/2 if (right_axis[2] != 0 or up_axis[2] != 0) else bump_depth/2
+        set_scale(prim, scale_x, scale_y, scale_z)
+        bind_material(prim, mat)
+
+
+# Colorful objects scattered inside the camera orbit at varying depths and
+# heights.  Objects at different distances from the camera move at different
+# rates in the image plane, giving clearly non-uniform flow fields.
+#   (prim_type, USD_path, xyz, half_scales, rgb_color)
+SCENE_OBJECTS = [
+    ("Sphere", "/World/Objects/S0", ( 0.8,  0.0,  0.40), (0.20, 0.20, 0.20), (0.90, 0.15, 0.15)),
+    ("Sphere", "/World/Objects/S1", ( 0.0,  0.8,  0.50), (0.18, 0.18, 0.18), (0.15, 0.75, 0.20)),
+    ("Sphere", "/World/Objects/S2", (-0.7,  0.3,  0.35), (0.15, 0.15, 0.15), (0.15, 0.40, 0.90)),
+    ("Sphere", "/World/Objects/S3", ( 0.4, -0.8,  0.45), (0.22, 0.22, 0.22), (0.10, 0.80, 0.80)),
+    ("Sphere", "/World/Objects/S4", (-0.5, -0.5,  0.30), (0.17, 0.17, 0.17), (0.90, 0.60, 0.10)),
+    # Cubes for sharp flow boundaries
+    ("Cube",   "/World/Objects/C0", ( 1.1,  0.5,  0.25), (0.20, 0.20, 0.20), (0.80, 0.20, 0.70)),
+    ("Cube",   "/World/Objects/C1", (-0.9, -0.7,  0.30), (0.22, 0.22, 0.22), (0.90, 0.90, 0.10)),
+    ("Cube",   "/World/Objects/C2", ( 0.5,  1.1,  0.20), (0.18, 0.18, 0.18), (0.10, 0.70, 0.50)),
+    ("Cube",   "/World/Objects/C3", (-1.2,  0.2,  0.25), (0.20, 0.20, 0.20), (0.90, 0.40, 0.10)),
+    # Tall pillars — strong vertical features visible from all angles
+    ("Cube",   "/World/Objects/P0", ( 1.0, -1.0,  0.50), (0.10, 0.10, 0.50), (0.95, 0.85, 0.20)),
+    ("Cube",   "/World/Objects/P1", (-1.0,  0.9,  0.45), (0.10, 0.10, 0.45), (0.20, 0.90, 0.60)),
+    ("Cube",   "/World/Objects/P2", ( 0.3, -1.2,  0.55), (0.10, 0.10, 0.55), (0.60, 0.20, 0.90)),
+]
+
+
+def add_scene_objects(stage):
+    mats = {}
+    for prim_type, path, xyz, scales, color in SCENE_OBJECTS:
+        mat_path = path + "/Mat"
+        mat = make_color_material(stage, mat_path, color)
+        mats[path] = mat
+
+        if prim_type == "Sphere":
+            prim = UsdGeom.Sphere.Define(stage, path).GetPrim()
+            # UsdGeom.Sphere radius = 1 by default; use uniform scale
+            set_xform(prim, t_xyz=xyz, quat_wxyz=(1, 0, 0, 0))
+            set_scale(prim, scales[0], scales[0], scales[0])
+        else:
+            prim = UsdGeom.Cube.Define(stage, path).GetPrim()
+            set_xform(prim, t_xyz=xyz, quat_wxyz=(1, 0, 0, 0))
+            set_scale(prim, scales[0], scales[1], scales[2])
+        bind_material(prim, mat)
+
+
+def add_floor_grid(stage, mat_a, mat_b, grid_half=3.0, n=7, tile_height=0.05):
+    """
+    Raised tile grid on the floor — gives visible ground texture when the
+    camera is at low height and creates clear flow on ground-facing pixels.
+    """
+    step = (2 * grid_half) / n
+    for row in range(n):
+        for col in range(n):
+            x = -grid_half + (col + 0.5) * step
+            y = -grid_half + (row + 0.5) * step
+            z = -tile_height / 2          # sits on the floor surface (z ≈ 0)
+            path = f"/World/FloorTiles/T_{row:02d}_{col:02d}"
+            prim = UsdGeom.Cube.Define(stage, path).GetPrim()
+            set_xform(prim, t_xyz=(x, y, z), quat_wxyz=(1, 0, 0, 0))
+            set_scale(prim, step/2 * 0.85, step/2 * 0.85, tile_height/2)
+            bind_material(prim, mat_a if (row + col) % 2 == 0 else mat_b)
+
+
 def build_textured_box(stage, box_half=1.0, n_grid=6):
-    mat_white = make_color_material(stage, "/World/Materials/White", (0.95, 0.95, 0.95))
-    mat_dark  = make_color_material(stage, "/World/Materials/Dark",  (0.12, 0.12, 0.12))
+    mat_white  = make_color_material(stage, "/World/Materials/White",  (0.95, 0.95, 0.95))
+    mat_dark   = make_color_material(stage, "/World/Materials/Dark",   (0.12, 0.12, 0.12))
+    mat_bump   = make_color_material(stage, "/World/Materials/Bump",   (0.85, 0.25, 0.10))
+    mat_floor_a = make_color_material(stage, "/World/Materials/FloorA", (0.80, 0.80, 0.80))
+    mat_floor_b = make_color_material(stage, "/World/Materials/FloorB", (0.30, 0.30, 0.30))
+
+    # Floor with raised tile grid
     floor = UsdGeom.Cube.Define(stage, "/World/Floor").GetPrim()
     set_xform(floor, t_xyz=(0.0, 0.0, -box_half - 0.03), quat_wxyz=(1, 0, 0, 0))
-    set_scale(floor, box_half * 3, box_half * 3, 0.03)
+    set_scale(floor, box_half * 4, box_half * 4, 0.03)
     bind_material(floor, mat_white)
+    add_floor_grid(stage, mat_floor_a, mat_floor_b,
+                   grid_half=box_half * 3.5, n=9, tile_height=0.06)
+
+    # Base box
     base = UsdGeom.Cube.Define(stage, "/World/BoxBase").GetPrim()
     set_xform(base, t_xyz=(0.0, 0.0, 0.0), quat_wxyz=(1, 0, 0, 0))
     set_scale(base, box_half, box_half, box_half)
     bind_material(base, mat_dark)
+
     d = box_half
     for face_cfg in [
         ("/World/Panels/FacePX", (d, 0, 0),  (0,1,0), (0,0,1)),
@@ -192,6 +297,12 @@ def build_textured_box(stage, box_half=1.0, n_grid=6):
         add_checkerboard_face(stage, prefix, mat_white, mat_dark,
                               center_xyz=ctr, right_axis=ra, up_axis=ua,
                               face_size=2*d, n_grid=n_grid)
+        add_bumps_to_face(stage, prefix + "/Bumps", mat_bump,
+                          center_xyz=ctr, right_axis=ra, up_axis=ua,
+                          face_size=2*d, n_bumps=3)
+
+    # Scattered objects at varying depths for parallax
+    add_scene_objects(stage)
 
 
 # ── Trajectory configurations ─────────────────────────────────────────────────
@@ -218,7 +329,7 @@ TRAJECTORIES = [
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    OUT_DIR = "./isaac_flow_data_v3"
+    OUT_DIR = "./isaac_flow_data_v4"
     RES     = (320, 240)
     W, H    = RES
     BOX_HALF = 1.0
@@ -232,7 +343,18 @@ def main():
     stage = omni.usd.get_context().get_stage()
     stage.DefinePrim("/World", "Xform")
     build_textured_box(stage, box_half=BOX_HALF, n_grid=N_GRID)
-    UsdLux.DomeLight.Define(stage, "/World/DomeLight")
+
+    # Dome light — must set intensity explicitly; the default is 0 in this kit.
+    dome = UsdLux.DomeLight.Define(stage, "/World/DomeLight")
+    dome.CreateIntensityAttr().Set(500.0)
+    dome.CreateColorAttr().Set(Gf.Vec3f(1.0, 1.0, 1.0))
+
+    # Distant light for directional shading so the checkerboard faces are
+    # distinguishable from different angles.
+    distant = UsdLux.DistantLight.Define(stage, "/World/DistantLight")
+    distant.CreateIntensityAttr().Set(1000.0)
+    distant.CreateAngleAttr().Set(0.53)
+    set_xform(distant.GetPrim(), t_xyz=(5.0, 3.0, 8.0), quat_wxyz=(1, 0, 0, 0))
 
     cam_prim = UsdGeom.Camera.Define(stage, "/World/Camera").GetPrim()
     set_xform(cam_prim, t_xyz=(TRAJECTORIES[0]['R0'], 0.0, TRAJECTORIES[0]['CAM_Z']),
@@ -245,7 +367,10 @@ def main():
     mv_anno  = rep.AnnotatorRegistry.get_annotator("motion_vectors")
     mv_anno.attach(rp)
 
-    rep.orchestrator.step()   # warm-up
+    # Warm-up: give the renderer enough steps to fully initialise materials
+    # and lighting before the first capture.  One step is not sufficient.
+    for _ in range(10):
+        rep.orchestrator.step()
 
     labels     = []
     all_mags   = []
