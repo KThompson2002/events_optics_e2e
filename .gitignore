@@ -3,7 +3,7 @@ __pycache__/
 # Data / results
 *.npz
 *.png
-
+*.mp4
 # Optional extras
 *.npy
 *.pt

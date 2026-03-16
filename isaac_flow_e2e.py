@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 
 from isaac_flow_sequence import IsaacFlowSequence
-from flow_net_events import FlowNetEvents
+from models.FlowNetS_spike import FlowNetS_spike
 from multiscaleloss import charbonnier_loss
 
 
@@ -58,7 +58,6 @@ def soft_events_to_spike_input(Epos, Eneg, T_bins=5):
     latter_on  = Epos[half:half + usable].reshape(T_bins, bin_size, H, W).sum(1)
     latter_off = Eneg[half:half + usable].reshape(T_bins, bin_size, H, W).sum(1)
 
-    # Spike-FlowNet expects [B, 4, H, W, T]
     inp = torch.stack([
         former_on.permute(1, 2, 0),    # [H, W, T_bins]
         former_off.permute(1, 2, 0),
@@ -216,19 +215,13 @@ def validate(model, val_loader, device):
                 if spike_in.sum() < MIN_EVENT_ACTIVITY:
                     continue
 
-                # Collapse temporal bins → [1, 4, H, W]  (sum over T_bins dim)
-                events_4ch = spike_in.sum(dim=-1)   # [1, 4, H, W]
-
                 # Eval mode returns only flow1: [1, 2, H, W]
-                flow_pred = model(events_4ch)
+                flow_pred = model(spike_in.float(), IMAGE_SIZE, SP_THRESH)
 
-                # Single-frame GT at the midpoint of the window.
-                # gt_flow[half] is the displacement from frame[half-1]→frame[half],
-                # the boundary between former and latter events — the most natural
-                # instantaneous flow target for the encoded event window.
+                # Accumulate GT over first half of window (matches training target)
                 T_seq = rgb_tchw.shape[1]
                 half  = (T_seq - 1) // 2                           # 15 for T=32
-                gt_total = gt_flow_tchw[b, half]                    # [2, H, W]
+                gt_total = gt_flow_tchw[b, 1:half + 1].sum(dim=0)  # [2, H, W]
 
                 # Resize GT to model output resolution and scale pixel values
                 H_orig, W_orig = gt_total.shape[1], gt_total.shape[2]
@@ -262,7 +255,7 @@ def validate(model, val_loader, device):
     print(f"  [validate] n_samples={n_samples}  "
           f"val_aee={val_aee:.4f}  val_aee_gt={val_aee_gt:.4f}  "
           f"pred_mag={pred_mag:.4f}  ratio={ratio:.3f}")
-    return val_aee, val_aee_gt, ratio, pred_mag
+    return val_aee, val_aee_gt, ratio
 
 
 def main():
@@ -272,7 +265,7 @@ def main():
     # ------------------------------------------------------------------
     # Data  (Isaac-Sim optical flow dataset)
     # ------------------------------------------------------------------
-    DATA_ROOT = "/home/lea1212/isaacsim/isaac_flow_data_v3"
+    DATA_ROOT = "/home/lea1212/isaacsim/isaac_flow_data_v2"
     T = 32                       # frames per sequence
     ds_train = IsaacFlowSequence(DATA_ROOT, T=T, stride=1, split='train')
     ds_val   = IsaacFlowSequence(DATA_ROOT, T=T, stride=1, split='val')
@@ -283,16 +276,16 @@ def main():
     print(f"Dataset split — train: {len(ds_train)}, val: {len(ds_val)}")
 
     # ------------------------------------------------------------------
-    # Event flow model  (ANN — clean gradient flow to all encoder layers)
+    # Spike-FlowNet model
     # ------------------------------------------------------------------
-    model = FlowNetEvents(batchNorm=True).to(device)
+    model = FlowNetS_spike(batchNorm=False).to(device)
     model.train()
 
     param_groups = [
         {'params': model.bias_parameters(), 'weight_decay': 0},
         {'params': model.weight_parameters(), 'weight_decay': 4e-4},
     ]
-    optimizer = torch.optim.Adam(param_groups, lr=1e-3,
+    optimizer = torch.optim.Adam(param_groups, lr=2e-5,
                                  betas=(0.9, 0.999))
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
@@ -304,11 +297,10 @@ def main():
     # Logging
     # ------------------------------------------------------------------
     log = {
-        "global_step": [], "loss": [], "gt_loss": [], "flow_mag": [],
+        "global_step": [], "loss": [], "gt_loss": [],
         "epoch": [], "step": [],
         # validation — one entry per check (every 20 steps + end of epoch)
-        "val_global_step": [], "val_aee": [], "val_aee_gt": [],
-        "val_ratio": [], "val_pred_mag": [],
+        "val_global_step": [], "val_aee": [], "val_aee_gt": [], "val_ratio": [],
         # epoch-boundary entries (subset of above, for convenience)
         "val_aee_epoch": [],
     }
@@ -320,7 +312,7 @@ def main():
     # ------------------------------------------------------------------
     NUM_EPOCHS = 5
     multiscale_weights = [1, 1, 1, 1]
-    half = (T - 1) // 2     # = 15 for T=32; single-frame GT at this midpoint
+    half = (T - 1) // 2     # = 15 for T=32; GT accumulated over frames 0→half
 
     for epoch in range(NUM_EPOCHS):
         for step, (rgb_tchw, gt_flow_tchw) in enumerate(dl):
@@ -340,10 +332,8 @@ def main():
                 video   = rgb_tchw[b]          # [T, 3, H, W]
                 gt_flow = gt_flow_tchw[b]      # [T, 2, H, W]
 
-                # Single-frame GT at the midpoint — displacement from
-                # frame[half-1] → frame[half], the boundary between former
-                # and latter events.  ~5 px at 320px scale, ~4 px at 256px.
-                gt_total = gt_flow[half]                             # [2, H, W]
+                # Accumulate GT displacement over first half of window.
+                gt_total = gt_flow[1:half + 1].sum(dim=0)   # [2, H, W]
 
                 # Augment video and GT consistently (flip only — no rotation).
                 # augment_with_gt also resizes both to IMAGE_SIZE.
@@ -367,11 +357,8 @@ def main():
                 if spike_in.sum() < MIN_EVENT_ACTIVITY:
                     continue
 
-                # Collapse temporal bins → [1, 4, H, W]  (sum over T_bins dim)
-                events_4ch = spike_in.sum(dim=-1)   # [1, 4, H, W]
-
                 # Forward pass — returns (flow1, flow2, flow3, flow4) in train
-                flows = model(events_4ch)
+                flows = model(spike_in.float(), IMAGE_SIZE, SP_THRESH)
                 flow1_mag = flows[0].detach().norm(dim=1).mean().item()
 
                 # Supervised GT flow loss at all four scales
@@ -387,7 +374,6 @@ def main():
 
             loss = torch.stack(losses).mean()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             # Logging
@@ -397,31 +383,28 @@ def main():
             log["loss"].append(loss.detach().float().cpu().item())
             log["gt_loss"].append(
                 torch.stack(gt_losses).mean().float().cpu().item())
-            mean_fmag = sum(flow_mags) / max(len(flow_mags), 1)
-            log["flow_mag"].append(mean_fmag)
             global_step += 1
 
             if step % 20 == 0:
+                mean_fmag = sum(flow_mags) / max(len(flow_mags), 1)
                 print(f"epoch={epoch}  step={step}  "
                       f"loss={loss.item():.4f}  "
                       f"gt_loss={log['gt_loss'][-1]:.4f}  "
                       f"flow_mag={mean_fmag:.4f}")
-                val_aee, val_aee_gt, val_ratio, val_pred_mag = validate(model, val_loader, device)
+                val_aee, val_aee_gt, val_ratio = validate(model, val_loader, device)
                 log["val_global_step"].append(global_step)
                 log["val_aee"].append(val_aee)
                 log["val_aee_gt"].append(val_aee_gt)
                 log["val_ratio"].append(val_ratio)
-                log["val_pred_mag"].append(val_pred_mag)
 
         scheduler.step()
 
         # Validation at end of epoch
-        val_aee, val_aee_gt, val_ratio, val_pred_mag = validate(model, val_loader, device)
+        val_aee, val_aee_gt, val_ratio = validate(model, val_loader, device)
         log["val_global_step"].append(global_step)
         log["val_aee"].append(val_aee)
         log["val_aee_gt"].append(val_aee_gt)
         log["val_ratio"].append(val_ratio)
-        log["val_pred_mag"].append(val_pred_mag)
         log["val_aee_epoch"].append(epoch)
         print(f"[epoch end] epoch={epoch}")
 
@@ -432,9 +415,10 @@ def main():
                     "state_dict": model.state_dict(),
                     "epoch": epoch,
                     "val_aee": val_aee,
+                    "spike_thresh": SP_THRESH,
                     "image_size": IMAGE_SIZE,
                 },
-                "flow_net_events_best.pth",
+                "spike_flownet_senpi_best.pth",
             )
             print(f"  => saved best checkpoint (val_aee={best_aee:.4f})")
 
@@ -447,14 +431,12 @@ def main():
         global_step=np.array(log["global_step"]),
         loss=np.array(log["loss"], dtype=np.float32),
         gt_loss=np.array(log["gt_loss"], dtype=np.float32),
-        flow_mag=np.array(log["flow_mag"], dtype=np.float32),
         epoch=np.array(log["epoch"]),
         step=np.array(log["step"]),
         val_global_step=np.array(log["val_global_step"]),
         val_aee=np.array(log["val_aee"], dtype=np.float32),
         val_aee_gt=np.array(log["val_aee_gt"], dtype=np.float32),
         val_ratio=np.array(log["val_ratio"], dtype=np.float32),
-        val_pred_mag=np.array(log["val_pred_mag"], dtype=np.float32),
         val_aee_epoch=np.array(log["val_aee_epoch"]),
     )
     print(f"Saved training logs to {out_path}")
@@ -463,9 +445,10 @@ def main():
             "state_dict": model.state_dict(),
             "epoch": NUM_EPOCHS - 1,
             "val_aee": log["val_aee"][-1] if log["val_aee"] else float("inf"),
+            "spike_thresh": SP_THRESH,
             "image_size": IMAGE_SIZE,
         },
-        "flow_net_events_final.pth",
+        "spike_flownet_senpi_final.pth",
     )
     print(f"Best val AEE: {best_aee:.4f}  (checkpoint: spike_flownet_senpi_best.pth)")
     print("Done.")
